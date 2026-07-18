@@ -69,7 +69,7 @@ class QuantumAI_Hide_Login {
 		}
 
 		global $pagenow, $error, $interim_login, $action;
-		$pagenow = 'wp-login.php';
+		$pagenow = 'wp-login.php'; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- deliberate; see the doc comment below for why this exact global needs setting here.
 
 		// wp-login.php's own top-level code assigns these as bare
 		// variables (correct when it's the real entry script, where

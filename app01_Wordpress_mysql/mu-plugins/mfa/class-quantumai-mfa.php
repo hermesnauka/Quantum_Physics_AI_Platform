@@ -74,9 +74,11 @@ class QuantumAI_MFA {
 		$stage = self::user_has_enrolled( $user->ID ) ? 'verify' : 'enroll';
 
 		$pending = array(
-			'user_id'    => $user->ID,
-			'stage'      => $stage,
-			'remember'   => ! empty( $_POST['rememberme'] ),
+			'user_id'     => $user->ID,
+			'stage'       => $stage,
+			// phpcs:ignore WordPress.Security.NonceVerification.Missing -- core's own wp-login.php POST carries no nonce (username+password is the proof); nothing to verify against here.
+			'remember'    => ! empty( $_POST['rememberme'] ),
+			// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- same: reading core's own unauthenticated login-form redirect target, not a state change.
 			'redirect_to' => ! empty( $_REQUEST['redirect_to'] ) ? wp_unslash( $_REQUEST['redirect_to'] ) : admin_url(),
 		);
 
@@ -97,11 +99,11 @@ class QuantumAI_MFA {
 	// ---------------------------------------------------------------
 
 	public static function handle_login_init() {
-		if ( empty( $_REQUEST[ self::TOKEN_PARAM ] ) ) {
+		if ( empty( $_REQUEST[ self::TOKEN_PARAM ] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- this token *is* the anti-CSRF control: an unguessable 256-bit value (bin2hex(random_bytes(32)) above) looked up server-side via get_transient(), functionally equivalent to a nonce rather than absent one.
 			return;
 		}
 
-		$token   = sanitize_text_field( wp_unslash( $_REQUEST[ self::TOKEN_PARAM ] ) );
+		$token   = sanitize_text_field( wp_unslash( $_REQUEST[ self::TOKEN_PARAM ] ) ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- see above.
 		$pending = get_transient( 'quantumai_mfa_' . $token );
 
 		if ( ! is_array( $pending ) || empty( $pending['user_id'] ) ) {
@@ -232,7 +234,7 @@ class QuantumAI_MFA {
 		if ( ! is_array( $fails ) ) {
 			$fails = array( 'count' => 0 );
 		}
-		$fails['count']++;
+		++$fails['count'];
 		set_transient( 'quantumai_mfa_fails_' . $user_id, $fails, self::LOCKOUT_TTL );
 	}
 
@@ -340,7 +342,7 @@ class QuantumAI_MFA {
 
 		$enrolled = self::user_has_enrolled( $user->ID );
 
-		if ( $enrolled && ! empty( $_GET['quantumai_mfa_reveal'] ) ) {
+		if ( $enrolled && ! empty( $_GET['quantumai_mfa_reveal'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- presence check only; the actual codes come from a transient set by handle_regenerate_recovery_codes(), which does verify a nonce before creating it.
 			$codes = get_transient( 'quantumai_mfa_reveal_' . $user->ID );
 			if ( is_array( $codes ) ) {
 				delete_transient( 'quantumai_mfa_reveal_' . $user->ID );

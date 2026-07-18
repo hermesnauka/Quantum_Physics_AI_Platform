@@ -10,14 +10,14 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 get_header();
 
-$term = get_queried_object();
+$qa_term = get_queried_object();
 ?>
 
 <main id="qa-content" class="qa-content">
 	<header>
 		<h1><?php echo esc_html( single_term_title( '', false ) ); ?></h1>
-		<?php if ( $term instanceof WP_Term && $term->description ) : ?>
-			<div class="qa-entry-meta"><?php echo wp_kses_post( $term->description ); ?></div>
+		<?php if ( $qa_term instanceof WP_Term && $qa_term->description ) : ?>
+			<div class="qa-entry-meta"><?php echo wp_kses_post( $qa_term->description ); ?></div>
 		<?php endif; ?>
 	</header>
 

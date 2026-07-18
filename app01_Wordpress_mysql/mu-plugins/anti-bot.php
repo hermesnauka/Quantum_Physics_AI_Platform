@@ -27,8 +27,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class QuantumAI_Anti_Bot {
 
-	const HONEYPOT_FIELD  = 'quantumai_hp_field';
-	const TIMESTAMP_FIELD = 'quantumai_hp_ts';
+	const HONEYPOT_FIELD   = 'quantumai_hp_field';
+	const TIMESTAMP_FIELD  = 'quantumai_hp_ts';
 	const MIN_FILL_SECONDS = 3;
 
 	public static function init() {
@@ -94,11 +94,11 @@ class QuantumAI_Anti_Bot {
 	 *                    false if the field is missing/tampered with.
 	 */
 	private static function elapsed_seconds_since_render() {
-		if ( empty( $_POST[ self::TIMESTAMP_FIELD ] ) ) {
+		if ( empty( $_POST[ self::TIMESTAMP_FIELD ] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Missing -- this *is* our own HMAC-signed anti-bot check (sign_timestamp()/hash_equals() below), not a state change needing a WP nonce.
 			return false;
 		}
 
-		$value = sanitize_text_field( wp_unslash( $_POST[ self::TIMESTAMP_FIELD ] ) );
+		$value = sanitize_text_field( wp_unslash( $_POST[ self::TIMESTAMP_FIELD ] ) ); // phpcs:ignore WordPress.Security.NonceVerification.Missing -- see the check above; same HMAC-signed value, not a nonce.
 		$parts = explode( '.', $value, 2 );
 		if ( 2 !== count( $parts ) || ! ctype_digit( $parts[0] ) ) {
 			return false;
@@ -112,7 +112,7 @@ class QuantumAI_Anti_Bot {
 	}
 
 	private static function honeypot_filled() {
-		return ! empty( $_POST[ self::HONEYPOT_FIELD ] );
+		return ! empty( $_POST[ self::HONEYPOT_FIELD ] ); // phpcs:ignore WordPress.Security.NonceVerification.Missing -- presence check only, no state change; a nonce here would just be one more field for a bot to helpfully echo back.
 	}
 
 	// ---------------------------------------------------------------

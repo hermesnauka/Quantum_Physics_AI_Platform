@@ -26,7 +26,7 @@ if ( post_password_required() ) {
 			printf(
 				/* translators: %s: number of comments */
 				esc_html( _n( '%s comment', '%s comments', get_comments_number(), 'quantumai' ) ),
-				number_format_i18n( get_comments_number() )
+				esc_html( number_format_i18n( get_comments_number() ) )
 			);
 			?>
 		</h2>

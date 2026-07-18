@@ -122,7 +122,7 @@ class QuantumAI_Audit_Log {
 	public static function prune() {
 		global $wpdb;
 
-		$days = defined( 'QUANTUMAI_AUDIT_LOG_RETENTION_DAYS' ) ? (int) QUANTUMAI_AUDIT_LOG_RETENTION_DAYS : 400;
+		$days   = defined( 'QUANTUMAI_AUDIT_LOG_RETENTION_DAYS' ) ? (int) QUANTUMAI_AUDIT_LOG_RETENTION_DAYS : 400;
 		$cutoff = gmdate( 'Y-m-d H:i:s', time() - ( max( 1, $days ) * DAY_IN_SECONDS ) );
 
 		$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . self::table_name() . ' WHERE event_time < %s', $cutoff ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name isn't user input.
@@ -140,11 +140,11 @@ class QuantumAI_Audit_Log {
 			array(
 				'event_time'  => current_time( 'mysql', true ),
 				'event_type'  => $event_type,
-				'user_id'     => $user_id ?: null,
+				'user_id'     => $user_id ? $user_id : null,
 				'user_login'  => $user_login,
 				'ip_address'  => self::get_client_ip(),
 				'object_type' => $object_type,
-				'object_id'   => $object_id ?: null,
+				'object_id'   => $object_id ? $object_id : null,
 				'message'     => $message,
 			),
 			array( '%s', '%s', '%d', '%s', '%s', '%s', '%d', '%s' )
@@ -184,7 +184,7 @@ class QuantumAI_Audit_Log {
 
 	public static function log_logout( $user_id ) {
 		$user = $user_id ? get_userdata( $user_id ) : false;
-		self::insert( 'logout', $user_id ?: null, $user ? $user->user_login : null );
+		self::insert( 'logout', $user_id ? $user_id : null, $user ? $user->user_login : null );
 	}
 
 	public static function log_user_register( $user_id ) {
@@ -214,7 +214,7 @@ class QuantumAI_Audit_Log {
 		);
 	}
 
-	public static function log_password_reset( $user, $new_pass ) {
+	public static function log_password_reset( $user, $new_pass ) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed -- $new_pass is required by the 'password_reset' action's signature (add_action(..., 10, 2) above); logging it would defeat the point of an audit log.
 		self::insert( 'password_reset', $user->ID, $user->user_login );
 	}
 
@@ -285,6 +285,12 @@ class QuantumAI_Audit_Log {
 	 * Builds the WHERE clause + prepared values shared by the admin list
 	 * view and the CSV export, from the same GET filters, so the export
 	 * always matches what's on screen.
+	 *
+	 * phpcs:disable WordPress.Security.NonceVerification.Recommended
+	 * A nonce protects a *state change*; every $_GET read in this method
+	 * only narrows a read-only, manage_options-gated list/export view — it
+	 * never writes anything. Disabled for the whole method rather than
+	 * commented per-line since every read here is the same case.
 	 */
 	private static function filters_from_request() {
 		global $wpdb;
@@ -314,12 +320,14 @@ class QuantumAI_Audit_Log {
 
 		return array( implode( ' AND ', $where ), $values );
 	}
+	// phpcs:enable WordPress.Security.NonceVerification.Recommended
 
 	public static function render_admin_page() {
 		if ( ! current_user_can( 'manage_options' ) ) {
 			wp_die( esc_html__( 'You do not have permission to view this page.', 'quantumai' ) );
 		}
 
+		// phpcs:disable WordPress.Security.NonceVerification.Recommended -- read-only, manage_options-gated view; see filters_from_request() above for the same reasoning. The one write-adjacent use ($_GET forwarded into the export link below) is itself wrapped in wp_nonce_url(), so the actual state-changing request (handle_export()) is nonce-verified.
 		global $wpdb;
 		$table = self::table_name();
 
@@ -328,13 +336,19 @@ class QuantumAI_Audit_Log {
 		$paged  = isset( $_GET['paged'] ) ? max( 1, absint( $_GET['paged'] ) ) : 1;
 		$offset = ( $paged - 1 ) * self::PER_PAGE;
 
-		$count_sql = "SELECT COUNT(*) FROM {$table} WHERE {$where}"; // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $where is built from a fixed set of placeholders above.
-		$total     = $values ? (int) $wpdb->get_var( $wpdb->prepare( $count_sql, $values ) ) : (int) $wpdb->get_var( $count_sql );
+		// $where/$table are built from a fixed set of placeholders and the
+		// $wpdb->prefix constant above, never raw user input — see
+		// filters_from_request(). phpcs:ignore comments below are on the
+		// line the sniff actually reports (the query call, not the string
+		// build) — a previous pass had them one line off, which silently
+		// did nothing.
+		$count_sql = "SELECT COUNT(*) FROM {$table} WHERE {$where}";
+		$total     = $values ? (int) $wpdb->get_var( $wpdb->prepare( $count_sql, $values ) ) : (int) $wpdb->get_var( $count_sql ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 
-		$rows_sql = "SELECT * FROM {$table} WHERE {$where} ORDER BY event_time DESC LIMIT %d OFFSET %d"; // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-		$rows     = $wpdb->get_results( $wpdb->prepare( $rows_sql, array_merge( $values, array( self::PER_PAGE, $offset ) ) ) );
+		$rows_sql = "SELECT * FROM {$table} WHERE {$where} ORDER BY event_time DESC LIMIT %d OFFSET %d";
+		$rows     = $wpdb->get_results( $wpdb->prepare( $rows_sql, array_merge( $values, array( self::PER_PAGE, $offset ) ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 
-		$event_types = $wpdb->get_col( "SELECT DISTINCT event_type FROM {$table} ORDER BY event_type" ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+		$event_types = $wpdb->get_col( "SELECT DISTINCT event_type FROM {$table} ORDER BY event_type" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__( 'Audit Log', 'quantumai' ) . '</h1>';
@@ -381,10 +395,23 @@ class QuantumAI_Audit_Log {
 
 		echo '</p></form>';
 
+		// A variable passed to esc_html__() can't be picked up by WordPress's
+		// string-extraction tooling (wp i18n make-pot), so each column header
+		// needs its own literal translation call rather than looping over an
+		// array of raw strings.
+		$columns = array(
+			esc_html__( 'Time (UTC)', 'quantumai' ),
+			esc_html__( 'Event', 'quantumai' ),
+			esc_html__( 'User', 'quantumai' ),
+			esc_html__( 'IP', 'quantumai' ),
+			esc_html__( 'Object', 'quantumai' ),
+			esc_html__( 'Details', 'quantumai' ),
+		);
+
 		echo '<table class="wp-list-table widefat fixed striped">';
 		echo '<thead><tr>';
-		foreach ( array( 'Time (UTC)', 'Event', 'User', 'IP', 'Object', 'Details' ) as $col ) {
-			echo '<th>' . esc_html__( $col, 'quantumai' ) . '</th>';
+		foreach ( $columns as $col ) {
+			echo '<th>' . esc_html( $col ) . '</th>';
 		}
 		echo '</tr></thead><tbody>';
 
@@ -396,7 +423,7 @@ class QuantumAI_Audit_Log {
 			echo '<tr>';
 			echo '<td>' . esc_html( $row->event_time ) . '</td>';
 			echo '<td>' . esc_html( $row->event_type ) . '</td>';
-			echo '<td>' . esc_html( $row->user_login ?: ( $row->user_id ? '#' . $row->user_id : '—' ) ) . '</td>';
+			echo '<td>' . esc_html( $row->user_login ? $row->user_login : ( $row->user_id ? '#' . $row->user_id : '—' ) ) . '</td>';
 			echo '<td>' . esc_html( $row->ip_address ) . '</td>';
 			echo '<td>' . esc_html( $row->object_type ? $row->object_type . ( $row->object_id ? ' #' . $row->object_id : '' ) : '—' ) . '</td>';
 			echo '<td>' . esc_html( $row->message ) . '</td>';
@@ -423,6 +450,7 @@ class QuantumAI_Audit_Log {
 
 		echo '</div>';
 	}
+	// phpcs:enable WordPress.Security.NonceVerification.Recommended
 
 	public static function handle_export() {
 		if ( ! current_user_can( 'manage_options' ) || ! isset( $_GET['_wpnonce'] ) || ! wp_verify_nonce( wp_unslash( $_GET['_wpnonce'] ), 'quantumai_audit_log_export' ) ) {
@@ -434,19 +462,23 @@ class QuantumAI_Audit_Log {
 
 		list( $where, $values ) = self::filters_from_request();
 
-		$sql  = "SELECT * FROM {$table} WHERE {$where} ORDER BY event_time DESC LIMIT %d"; // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-		$rows = $wpdb->get_results( $wpdb->prepare( $sql, array_merge( $values, array( self::EXPORT_ROW_CAP ) ) ) );
+		$sql  = "SELECT * FROM {$table} WHERE {$where} ORDER BY event_time DESC LIMIT %d"; // $where/$table are never raw user input — see filters_from_request().
+		$rows = $wpdb->get_results( $wpdb->prepare( $sql, array_merge( $values, array( self::EXPORT_ROW_CAP ) ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 
 		nocache_headers();
 		header( 'Content-Type: text/csv; charset=utf-8' );
 		header( 'Content-Disposition: attachment; filename=quantumai-audit-log-' . gmdate( 'Y-m-d' ) . '.csv' );
 
-		$out = fopen( 'php://output', 'w' );
+		// php://output is the current HTTP response stream, not a real file
+		// on disk — there's no filesystem path here for WP_Filesystem to
+		// operate on, so the direct fopen/fputcsv/fclose calls are the
+		// correct tool, not a shortcut around WP_Filesystem.
+		$out = fopen( 'php://output', 'w' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		fputcsv( $out, array( 'event_time_utc', 'event_type', 'user_id', 'user_login', 'ip_address', 'object_type', 'object_id', 'message' ) );
 		foreach ( $rows as $row ) {
 			fputcsv( $out, array( $row->event_time, $row->event_type, $row->user_id, $row->user_login, $row->ip_address, $row->object_type, $row->object_id, $row->message ) );
 		}
-		fclose( $out );
+		fclose( $out ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		exit;
 	}
 }

@@ -15,9 +15,9 @@ if ( ! defined( 'ABSPATH' ) ) {
 class QuantumAI_TOTP {
 
 	const SECRET_BYTES = 20; // 160 bits.
-	const DIGITS        = 6;
-	const PERIOD         = 30; // seconds
-	const WINDOW         = 1;  // allow ±1 step (±30s) of clock drift
+	const DIGITS       = 6;
+	const PERIOD       = 30; // seconds
+	const WINDOW       = 1;  // allow ±1 step (±30s) of clock drift
 
 	const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 

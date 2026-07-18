@@ -38,7 +38,7 @@ function quantumai_plugin_management_locked() {
  * this alone is enough to hide/403 the entire "install or turn on a new
  * plugin" path — no separate menu-hiding or request-blocking code needed.
  */
-function quantumai_strip_plugin_management_caps( $allcaps, $caps, $args, $user ) {
+function quantumai_strip_plugin_management_caps( $allcaps, $caps, $args, $user ) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed -- $caps/$args/$user are required by the 'user_has_cap' filter's signature (add_filter(..., 10, 4) below), not optional.
 	if ( ! quantumai_plugin_management_locked() ) {
 		return $allcaps;
 	}

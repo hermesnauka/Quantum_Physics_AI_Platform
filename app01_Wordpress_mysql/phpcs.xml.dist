@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<ruleset name="QuantumAI">
+    <description>SAST ruleset (PLAN.md Phase 4) scoped to this app's own mu-plugins and theme — not WordPress core, not the vendored third-party MathJax build.</description>
+
+    <file>mu-plugins</file>
+    <file>wp-content/themes/quantumai-theme</file>
+
+    <exclude-pattern>wp-content/themes/quantumai-theme/assets/vendor/*</exclude-pattern>
+
+    <arg name="extensions" value="php"/>
+    <arg name="colors"/>
+    <arg value="sp"/>
+    <arg name="parallel" value="8"/>
+
+    <config name="testVersion" value="8.3-"/>
+    <config name="minimum_supported_wp_version" value="6.5"/>
+
+    <rule ref="WordPress-Extra">
+        <!-- File-organization sniffs assume the one-class-per-file WP core
+             convention; several mu-plugins deliberately bundle related
+             functions/a small class in one file (matches the project's own
+             stated "self-contained, single file per requirement" convention
+             — see mu-plugins/*.php doc comments). Not a security concern. -->
+        <exclude name="WordPress.Files.FileName"/>
+    </rule>
+
+    <rule ref="WordPress.WP.I18n">
+        <properties>
+            <property name="text_domain" type="array">
+                <element value="quantumai"/>
+            </property>
+        </properties>
+    </rule>
+</ruleset>

@@ -30,7 +30,7 @@ remove_action( 'wp_head', 'wlwmanifest_link' );
  * own 301 first, handing over the username before this ever runs.
  */
 function quantumai_block_author_enumeration() {
-	if ( is_admin() || ! isset( $_GET['author'] ) ) {
+	if ( is_admin() || ! isset( $_GET['author'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- presence check only (value never read/used), redirecting away from a probe pattern isn't a state change.
 		return;
 	}
 

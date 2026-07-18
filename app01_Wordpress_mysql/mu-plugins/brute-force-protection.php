@@ -32,11 +32,11 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class QuantumAI_Brute_Force_Protection {
 
-	const IP_PREFIX     = 'quantumai_bf_ip_';
-	const USER_PREFIX   = 'quantumai_bf_user_';
-	const IP_MAX_FAILS  = 20;
+	const IP_PREFIX      = 'quantumai_bf_ip_';
+	const USER_PREFIX    = 'quantumai_bf_user_';
+	const IP_MAX_FAILS   = 20;
 	const USER_MAX_FAILS = 5;
-	const LOCKOUT_TTL   = 900; // 15 minutes
+	const LOCKOUT_TTL    = 900; // 15 minutes
 
 	public static function init() {
 		add_filter( 'authenticate', array( __CLASS__, 'block_if_locked_out' ), 22, 1 );
@@ -46,7 +46,7 @@ class QuantumAI_Brute_Force_Protection {
 
 	public static function block_if_locked_out( $user ) {
 		$ip       = self::get_client_ip();
-		$username = isset( $_POST['log'] ) ? sanitize_user( wp_unslash( $_POST['log'] ), true ) : '';
+		$username = isset( $_POST['log'] ) ? sanitize_user( wp_unslash( $_POST['log'] ), true ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Missing -- read-only rate-limit check, not a state change; core's own login POST carries no nonce to verify against.
 
 		if ( self::is_locked_out( $ip, $username ) ) {
 			return new WP_Error(
@@ -86,7 +86,7 @@ class QuantumAI_Brute_Force_Protection {
 		if ( ! is_array( $fails ) ) {
 			$fails = array( 'count' => 0 );
 		}
-		$fails['count']++;
+		++$fails['count'];
 		set_transient( $key, $fails, self::LOCKOUT_TTL );
 	}
 

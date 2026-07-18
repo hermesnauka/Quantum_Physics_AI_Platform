@@ -136,6 +136,19 @@ Also not a mu-plugin — covered by existing conventions rather than new code:
   the one place a request param is read (`inc/security.php`'s
   author-enumeration block) only calls `isset()` on it, never echoes it.
 
+## SQL injection (AS-04)
+
+No custom search/filter query code exists — article filtering (search,
+topic taxonomy archives) is all native `WP_Query`, which core is
+responsible for parameterizing safely. Audited every direct `$wpdb` call in
+this codebase (`grep -rn '\$wpdb->' mu-plugins wp-content`, checked each
+result): the only ones outside `$wpdb->prepare()`/`$wpdb->insert()` are
+`$wpdb->prefix` (a constant, not user input) and one
+`$wpdb->get_col("... FROM {$table} ...")` in the audit log, where `{$table}`
+is that same prefix constant, never a request value. Confirmed live against
+the running stack too: a `UNION SELECT`-style payload on the search endpoint
+gets a `403` from the WAF (see above) before it would ever reach a query.
+
 ## Security mu-plugins (SR-01, SR-02, SR-05, SR-06, AS-01, AS-03)
 
 All seven are self-contained (no third-party plugin dependency, same

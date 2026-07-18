@@ -143,6 +143,23 @@ services:
     networks:
       - web
 
+  # PLAN.md Phase 4 SAST: PHPCS + WordPress Coding Standards, scoped to
+  # mu-plugins/ and the theme (see phpcs.xml.dist). Opt-in, same as wpscan:
+  #   docker compose --profile sast run --rm phpcs
+  phpcs:
+    image: composer:2
+    profiles: ["sast"]
+    working_dir: /app
+    volumes:
+      - ./composer.json:/app/composer.json:ro
+      - ./composer.lock:/app/composer.lock:ro
+      - ./phpcs.xml.dist:/app/phpcs.xml.dist:ro
+      - ./vendor:/app/vendor
+      - ./mu-plugins:/app/mu-plugins:ro
+      - ./wp-content/themes/quantumai-theme:/app/wp-content/themes/quantumai-theme:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command: "composer install --no-interaction --no-progress --quiet && vendor/bin/phpcs"
+
 networks:
   # DB <-> WordPress only. Marked internal so the database is unreachable from the
   # host or the public internet, and has no outbound route either (least privilege).

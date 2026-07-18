@@ -78,7 +78,7 @@ add_action( 'wp_enqueue_scripts', 'quantumai_enqueue_mathjax' );
  * breaks, or just write \[ ... \] directly in the content instead.
  */
 function quantumai_latex_shortcode( $atts, $content = '' ) {
-	$atts = shortcode_atts( array( 'display' => 'true' ), $atts, 'latex' );
+	$atts    = shortcode_atts( array( 'display' => 'true' ), $atts, 'latex' );
 	$content = trim( (string) $content );
 
 	if ( '' === $content ) {

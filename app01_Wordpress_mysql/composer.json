@@ -1,0 +1,21 @@
+{
+    "name": "quantumai/wordpress-sast",
+    "description": "Dev tooling only (PLAN.md Phase 4 SAST) — not part of the runtime app, which has no Composer dependencies by design (see mu-plugins' own doc comments on why: no third-party plugin/dependency surface).",
+    "type": "project",
+    "license": "proprietary",
+    "require-dev": {
+        "squizlabs/php_codesniffer": "^3.9",
+        "wp-coding-standards/wpcs": "^3.1",
+        "phpcsstandards/phpcsutils": "^1.0",
+        "phpcsstandards/phpcsextra": "^1.2",
+        "dealerdirect/phpcodesniffer-composer-installer": "^1.0"
+    },
+    "config": {
+        "allow-plugins": {
+            "dealerdirect/phpcodesniffer-composer-installer": true
+        }
+    },
+    "scripts": {
+        "lint": "phpcs"
+    }
+}
