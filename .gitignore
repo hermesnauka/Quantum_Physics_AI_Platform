@@ -17,6 +17,9 @@ tmp/
 # environment, never committed. "**/" for the same reason as .claude/ above.
 **/nginx/certs/
 
+# WPScan output (AS-03) — local scan artifacts, not something to version.
+**/security-reports/
+
 # OS cruft
 .DS_Store
 Thumbs.db

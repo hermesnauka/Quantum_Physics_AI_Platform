@@ -1,0 +1,173 @@
+# AS-03 WAF: this is the ONLY file we override from the owasp/modsecurity-crs
+# image (mounted to /etc/nginx/templates/conf.d/default.conf.template). Every
+# other template (nginx.conf.template, modsecurity.conf.template, and the
+# includes/ directory — proxy_backend.conf, location_common.conf, cors.conf)
+# is the image's own default, unmodified. ModSecurity itself is turned on
+# globally at the http{} level by the image's own modsecurity.conf.template,
+# so it applies to everything below with no extra directives needed here.
+#
+# This is a close port of the image's own default.conf.template (see
+# https://github.com/coreruleset/modsecurity-crs-docker/blob/master/nginx/templates/conf.d/default.conf.template)
+# with QuantumAI's SR-03 TLS/HSTS setup, SR-05/AS-01 XML-RPC and config/dotfile
+# denies, AS-03 no-PHP-in-uploads, and NFR-01/02 microcache layered in.
+# Diverging from upstream here (rather than adding a second server{} block)
+# because nginx can't merge location blocks from two different server{}
+# stanzas listening on the same port/server_name — the WAF-specific location
+# blocks and the pre-existing ones have to live in the same file.
+
+server_tokens ${SERVER_TOKENS};
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    '' close;
+}
+
+# NFR-01/02: anonymous-page microcache, unchanged from the pre-WAF config. A
+# cache HIT never reaches PHP/MySQL (or ModSecurity's response-body
+# inspection) at all — see the original comment history in git for the full
+# "why" (60s TTL trade-off etc.) if this file's own comments feel terse.
+proxy_cache_path /var/cache/nginx/wp levels=1:2 keys_zone=wp_cache:10m max_size=200m inactive=10m use_temp_path=off;
+
+# Never serve a cached page to a request carrying a cookie implying
+# personalized/sensitive content: a logged-in session, a just-submitted
+# (still-pending-moderation) comment, or a post-visible-by-password cookie.
+map $http_cookie $quantumai_cookie_bypass {
+    default 0;
+    "~*wordpress_logged_in_" 1;
+    "~*comment_author_" 1;
+    "~*wp-postpass_" 1;
+}
+
+server {
+    listen ${PORT} default_server;
+
+    server_name ${SERVER_NAME};
+    set $always_redirect ${NGINX_ALWAYS_TLS_REDIRECT};
+
+    client_max_body_size 32m;
+
+    PROXY_SSL_CONFIG
+
+    # SR-05 / AS-01: block WordPress XML-RPC even on the redirect-only port.
+    location = /xmlrpc.php {
+        deny all;
+        return 403;
+    }
+
+    location / {
+        if ($always_redirect = on) {
+            return 301 https://$host$request_uri;
+        }
+
+        include includes/cors.conf;
+        include includes/proxy_backend.conf;
+
+        index index.html index.htm;
+        root /usr/share/nginx/html;
+    }
+
+    include includes/location_common.conf;
+}
+
+server {
+    listen ${SSL_PORT} ssl;
+    http2 on;
+
+    server_name ${SERVER_NAME};
+
+    client_max_body_size 32m;
+
+    ssl_certificate ${SSL_CERT_FILE};
+    ssl_certificate_key ${SSL_CERT_KEY_FILE};
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:MozSSL:10m;
+    ssl_session_tickets off;
+
+    ssl_dhparam /etc/ssl/certs/dhparam-${SSL_DH_BITS}.pem;
+
+    # SR-03: TLS 1.3 only, per SR-03's literal wording (same trade-off as
+    # before the WAF: a client that can't do 1.3 gets a hard handshake
+    # failure, not a 1.2 fallback).
+    ssl_protocols ${SSL_PROTOCOLS};
+    ssl_ciphers ${SSL_CIPHERS};
+    ssl_prefer_server_ciphers ${SSL_PREFER_CIPHERS};
+
+    ssl_stapling ${SSL_OCSP_STAPLING};
+    ssl_stapling_verify ${SSL_OCSP_STAPLING};
+
+    ssl_verify_client ${SSL_VERIFY};
+    ssl_verify_depth ${SSL_VERIFY_DEPTH};
+
+    PROXY_SSL_CONFIG
+
+    # SR-05 / AS-01: block WordPress XML-RPC, a common brute-force
+    # amplification and pingback-DDoS vector (also disabled at the app layer
+    # in wp-config).
+    location = /xmlrpc.php {
+        deny all;
+        return 403;
+    }
+
+    # Never serve config or dotfiles even if a misconfigured plugin exposes them.
+    location ~* wp-config\.php$ {
+        deny all;
+    }
+    location ~ /\.(?!well-known) {
+        deny all;
+    }
+
+    # PHP execution is not allowed inside the uploads directory (defense
+    # against AS-03 RCE-via-upload) — on top of, not instead of, ModSecurity's
+    # own generic rules; belt-and-braces is cheap here.
+    location ~* /wp-content/uploads/.*\.php$ {
+        deny all;
+    }
+
+    location / {
+        include includes/cors.conf;
+        include includes/proxy_backend.conf;
+
+        # Bypass the cache entirely for anything that isn't a plain,
+        # anonymous GET of a "normal" URL: form submissions, admin/login
+        # (also blocked outright at the app layer, but never cache them
+        # regardless), the REST API, feeds, and any URL with a query string.
+        set $quantumai_skip_cache 0;
+        if ($request_method != GET) {
+            set $quantumai_skip_cache 1;
+        }
+        if ($query_string != "") {
+            set $quantumai_skip_cache 1;
+        }
+        if ($request_uri ~* "^/(wp-admin/|wp-login\.php|wp-json/|feed/|wp-cron\.php)") {
+            set $quantumai_skip_cache 1;
+        }
+        if ($quantumai_cookie_bypass = 1) {
+            set $quantumai_skip_cache 1;
+        }
+
+        proxy_cache wp_cache;
+        proxy_cache_key "$scheme$request_method$host$request_uri";
+        proxy_cache_valid 200 60s;
+        proxy_cache_bypass $quantumai_skip_cache;
+        proxy_no_cache $quantumai_skip_cache;
+        proxy_ignore_headers Cache-Control Expires;
+        proxy_cache_lock on;
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+        proxy_cache_background_update on;
+
+        index index.html index.htm;
+        root /usr/share/nginx/html;
+    }
+
+    include includes/location_common.conf;
+
+    # PLAN.md Phase 2 CSP headers, unchanged from the pre-WAF config.
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; frame-ancestors 'self';" always;
+    add_header X-Cache-Status $upstream_cache_status always;
+    # SR-03: pin browsers to HTTPS for this host going forward.
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+}

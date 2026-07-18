@@ -1,0 +1,68 @@
+# AS-03 "automate weekly DAST scans (WPScan)". Spins up a throwaway instance
+# of the app01_Wordpress_mysql stack inside the runner, scans it, uploads the
+# report, then tears the whole thing down — nothing here is ever reachable
+# from outside the runner.
+#
+# NOTE (unverified): authored and reasoned through, but not run against a
+# real GitHub Actions runner from this environment — no way to execute a
+# workflow_dispatch from here. Sanity-check the first run's logs, in
+# particular the "wait for WordPress" step and the WPSCAN_API_TOKEN secret
+# actually being picked up, before trusting the weekly schedule unattended.
+name: Weekly WPScan (AS-03)
+
+on:
+  schedule:
+    - cron: '0 3 * * 1' # every Monday 03:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  wpscan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app01_Wordpress_mysql
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create a throwaway .env for this ephemeral scan stack
+        run: |
+          cp .env.example .env
+          sed -i "s#^MYSQL_ROOT_PASSWORD=.*#MYSQL_ROOT_PASSWORD=$(openssl rand -hex 16)#" .env
+          sed -i "s#^WP_DB_PASSWORD=.*#WP_DB_PASSWORD=$(openssl rand -hex 16)#" .env
+          for key in WORDPRESS_AUTH_KEY WORDPRESS_SECURE_AUTH_KEY WORDPRESS_LOGGED_IN_KEY WORDPRESS_NONCE_KEY WORDPRESS_AUTH_SALT WORDPRESS_SECURE_AUTH_SALT WORDPRESS_LOGGED_IN_SALT WORDPRESS_NONCE_SALT; do
+            sed -i "s#^${key}=.*#${key}=$(openssl rand -hex 32)#" .env
+          done
+          mkdir -p security-reports
+          chmod 777 security-reports
+
+      - name: Start the stack
+        run: docker compose up -d
+
+      - name: Wait for WordPress to answer
+        run: |
+          for i in $(seq 1 30); do
+            if curl -ks https://localhost:8443/ -o /dev/null; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "WordPress never came up in time" >&2
+          docker compose logs
+          exit 1
+
+      - name: Run WPScan
+        env:
+          WPSCAN_API_TOKEN: ${{ secrets.WPSCAN_API_TOKEN }}
+        run: docker compose --profile scan run --rm wpscan
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wpscan-report
+          path: app01_Wordpress_mysql/security-reports/
+          if-no-files-found: warn
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

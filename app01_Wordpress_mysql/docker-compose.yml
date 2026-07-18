@@ -79,25 +79,67 @@ services:
       - internal
       - web
 
+  # AS-03 WAF: reverse proxy + TLS termination + ModSecurity/OWASP CRS, in
+  # place of plain nginx:alpine. Runs as an unprivileged user (image
+  # constraint), so it listens on 8080/8443 *inside* the container regardless
+  # of what's published on the host — see PORT/SSL_PORT below.
   nginx:
-    image: nginx:alpine
+    image: owasp/modsecurity-crs:nginx
     restart: unless-stopped
     depends_on:
       - wordpress
     environment:
-      # SR-03: only consumed by the stock nginx image's own
-      # envsubst-on-templates entrypoint step, to bake the externally-published
-      # HTTPS port into the HTTP -> HTTPS redirect (nginx/templates/wordpress.conf.template).
-      HTTPS_PORT: ${HTTPS_PORT:-8443}
+      SERVER_NAME: ${SERVER_NAME:-localhost}
+      BACKEND: http://wordpress:80
+      PORT: 8080
+      SSL_PORT: 8443
+      # SR-03: unchanged from the pre-WAF setup — TLS 1.3 only, always
+      # redirect plain HTTP to HTTPS.
+      SSL_PROTOCOLS: TLSv1.3
+      NGINX_ALWAYS_TLS_REDIRECT: "on"
+      # CRS tuning: PARANOIA 1 is CRS's own recommended starting point (low
+      # false-positive rate); MODSEC_RULE_ENGINE On means it actually blocks,
+      # not just logs, satisfying AS-03's "block common exploit payloads" —
+      # not merely observe them. If a real admin workflow ever gets a false
+      # positive, the fix is a scoped exclusion in nginx/waf/, not raising
+      # these thresholds.
+      BLOCKING_PARANOIA: 1
+      ANOMALY_INBOUND: 5
+      ANOMALY_OUTBOUND: 4
+      MODSEC_RULE_ENGINE: "On"
     ports:
-      - "${HTTP_PORT:-8080}:80"
-      - "${HTTPS_PORT:-8443}:443"
+      - "${HTTP_PORT:-8080}:8080"
+      - "${HTTPS_PORT:-8443}:8443"
     volumes:
-      - ./nginx/templates:/etc/nginx/templates:ro
-      - ./nginx/docker-entrypoint.d/40-quantumai-tls-setup.sh:/docker-entrypoint.d/40-quantumai-tls-setup.sh:ro
-      - ./nginx/certs:/etc/nginx/certs
+      - ./nginx/waf/default.conf.template:/etc/nginx/templates/conf.d/default.conf.template:ro
+      - ./nginx/waf/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf:ro
+      - ./nginx/waf/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf:ro
+      # Persists the self-signed cert this image generates on first boot
+      # (same "generate one if none exists" behavior our own SR-03 script
+      # used to do by hand — this image does it natively, so that script is
+      # gone) so it survives container recreation instead of re-prompting a
+      # browser cert warning every restart.
+      - ./nginx/certs:/etc/nginx/conf
       - wp_data:/var/www/html:ro
       - nginx_cache:/var/cache/nginx
+    networks:
+      - web
+
+  # AS-03 "automate weekly DAST scans (WPScan)". Not started by a plain
+  # `docker compose up` — the "scan" profile means it only runs on demand:
+  #   docker compose --profile scan run --rm wpscan
+  # See README "Vulnerability scanning (AS-03)" for the weekly-cadence setup.
+  wpscan:
+    image: wpscanteam/wpscan:latest
+    profiles: ["scan"]
+    depends_on:
+      - nginx
+    environment:
+      WPSCAN_API_TOKEN: ${WPSCAN_API_TOKEN:-}
+    entrypoint: ["/bin/sh", "/security/run-wpscan.sh"]
+    volumes:
+      - ./security/run-wpscan.sh:/security/run-wpscan.sh:ro
+      - ./security-reports:/report
     networks:
       - web
 
