@@ -1,0 +1,84 @@
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?set MYSQL_DATABASE in .env}
+      WP_DB_USER: ${WP_DB_USER:?set WP_DB_USER in .env}
+      WP_DB_PASSWORD: ${WP_DB_PASSWORD:?set WP_DB_PASSWORD in .env}
+    # Require TLS for all client connections (SR-03 / PLAN Phase 2 "Encrypted database
+    # connections"). MySQL 8 auto-generates a self-signed CA/cert/key in the data
+    # directory on first boot if none are supplied.
+    command: --require-secure-transport=ON
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  wordpress:
+    image: wordpress:php8.3-apache
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_NAME: ${MYSQL_DATABASE}
+      WORDPRESS_DB_USER: ${WP_DB_USER}
+      WORDPRESS_DB_PASSWORD: ${WP_DB_PASSWORD}
+      WORDPRESS_TABLE_PREFIX: ${WP_TABLE_PREFIX:-wp_}
+      WORDPRESS_AUTH_KEY: ${WORDPRESS_AUTH_KEY}
+      WORDPRESS_SECURE_AUTH_KEY: ${WORDPRESS_SECURE_AUTH_KEY}
+      WORDPRESS_LOGGED_IN_KEY: ${WORDPRESS_LOGGED_IN_KEY}
+      WORDPRESS_NONCE_KEY: ${WORDPRESS_NONCE_KEY}
+      WORDPRESS_AUTH_SALT: ${WORDPRESS_AUTH_SALT}
+      WORDPRESS_SECURE_AUTH_SALT: ${WORDPRESS_SECURE_AUTH_SALT}
+      WORDPRESS_LOGGED_IN_SALT: ${WORDPRESS_LOGGED_IN_SALT}
+      WORDPRESS_NONCE_SALT: ${WORDPRESS_NONCE_SALT}
+      # SR-04 / AS-03 mitigations: no in-browser file editing, force encrypted DB
+      # connection. (XML-RPC is disabled via the mu-plugin below, not here —
+      # add_filter() isn't defined yet when this block is evaluated.)
+      WORDPRESS_CONFIG_EXTRA: |
+        define('DISALLOW_FILE_EDIT', true);
+        define('WP_AUTO_UPDATE_CORE', 'minor');
+        define('MYSQL_CLIENT_FLAGS', MYSQLI_CLIENT_SSL);
+    volumes:
+      - wp_data:/var/www/html
+      - ./wp-php/uploads.ini:/usr/local/etc/php/conf.d/uploads.ini:ro
+      - ./mu-plugins:/var/www/html/wp-content/mu-plugins:ro
+    networks:
+      - internal
+      - web
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    depends_on:
+      - wordpress
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - wp_data:/var/www/html:ro
+    networks:
+      - web
+
+networks:
+  # DB <-> WordPress only. Marked internal so the database is unreachable from the
+  # host or the public internet, and has no outbound route either (least privilege).
+  internal:
+    internal: true
+  # WordPress <-> nginx. Not internal, so WordPress still has outbound internet
+  # access for core/plugin update checks, and nginx can publish a host port.
+  web:
+
+volumes:
+  db_data:
+  wp_data:
