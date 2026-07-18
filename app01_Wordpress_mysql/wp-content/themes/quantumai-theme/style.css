@@ -1,0 +1,178 @@
+/*
+Theme Name: QuantumAI Educational Theme
+Theme URI: https://example.org/
+Author: QuantumAI Platform Team
+Description: Editorial theme for the QuantumAI & Physics Educational Platform. Built for scientific reading, with native LaTeX rendering (MathJax) and a Quantum Computing / AI-LLM-LRM / Quantum Physics / Post-Quantum Cryptography topic taxonomy.
+Version: 0.1.0
+Requires at least: 6.4
+Requires PHP: 8.0
+License: GNU General Public License v2 or later
+License URI: https://www.gnu.org/licenses/gpl-2.0.html
+Text Domain: quantumai
+*/
+
+/* ---------------------------------------------------------------------
+   Base / reading typography (NFR-03: readable, mobile-responsive,
+   optimized for scientific reading).
+   --------------------------------------------------------------------- */
+
+:root {
+	--qa-max-width: 44rem;
+	--qa-color-text: #1b1b1f;
+	--qa-color-bg: #ffffff;
+	--qa-color-muted: #5a5a63;
+	--qa-color-accent: #2c4bd4;
+	--qa-color-border: #e2e2e8;
+	--qa-font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+	--qa-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--qa-color-text: #e7e7ea;
+		--qa-color-bg: #17171a;
+		--qa-color-muted: #a3a3ab;
+		--qa-color-accent: #8ea2ff;
+		--qa-color-border: #303035;
+	}
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	background: var(--qa-color-bg);
+	color: var(--qa-color-text);
+	font-family: var(--qa-font-body);
+	font-size: 1.0625rem;
+	line-height: 1.7;
+}
+
+.qa-skip-link {
+	position: absolute;
+	left: -999px;
+	top: auto;
+	background: var(--qa-color-accent);
+	color: #fff;
+	padding: 0.75rem 1rem;
+	z-index: 1000;
+}
+
+.qa-skip-link:focus {
+	left: 1rem;
+	top: 1rem;
+}
+
+.qa-site-header,
+.qa-site-footer {
+	border-bottom: 1px solid var(--qa-color-border);
+	padding: 1rem;
+}
+
+.qa-site-footer {
+	border-top: 1px solid var(--qa-color-border);
+	border-bottom: none;
+	margin-top: 3rem;
+	color: var(--qa-color-muted);
+	font-size: 0.9rem;
+}
+
+.qa-site-branding a {
+	color: inherit;
+	text-decoration: none;
+	font-weight: 700;
+	font-size: 1.25rem;
+}
+
+.qa-primary-nav ul {
+	list-style: none;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 1rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+}
+
+.qa-primary-nav a {
+	color: var(--qa-color-text);
+	text-decoration: none;
+}
+
+.qa-primary-nav a:hover {
+	color: var(--qa-color-accent);
+}
+
+.qa-content {
+	max-width: var(--qa-max-width);
+	margin: 0 auto;
+	padding: 2rem 1rem;
+}
+
+.qa-content--wide {
+	max-width: 60rem;
+}
+
+article + article {
+	margin-top: 2.5rem;
+	padding-top: 2.5rem;
+	border-top: 1px solid var(--qa-color-border);
+}
+
+.qa-entry-title a {
+	color: inherit;
+	text-decoration: none;
+}
+
+.qa-entry-meta,
+.qa-entry-topics {
+	color: var(--qa-color-muted);
+	font-size: 0.875rem;
+}
+
+.qa-entry-topics a {
+	color: var(--qa-color-accent);
+	text-decoration: none;
+}
+
+.qa-entry-content h2,
+.qa-entry-content h3 {
+	line-height: 1.3;
+}
+
+.qa-entry-content pre,
+.qa-entry-content code {
+	font-family: var(--qa-font-mono);
+	background: var(--qa-color-border);
+	border-radius: 4px;
+}
+
+.qa-entry-content code {
+	padding: 0.125rem 0.35rem;
+}
+
+.qa-entry-content pre {
+	padding: 1rem;
+	overflow-x: auto;
+}
+
+/* Long/wide rendered equations must scroll within their own box on narrow
+   viewports rather than overflowing (or being clipped by) the page. */
+mjx-container {
+	overflow-x: auto;
+	overflow-y: hidden;
+	max-width: 100%;
+}
+
+.qa-latex-error {
+	color: #b3261e;
+	font-family: var(--qa-font-mono);
+	font-size: 0.875rem;
+}
+
+@media (max-width: 40rem) {
+	body {
+		font-size: 1rem;
+	}
+}

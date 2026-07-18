@@ -14,6 +14,8 @@ the full Secure SDLC rationale behind the choices below.
 * `nginx/conf.d/wordpress.conf` — CSP/security headers, blocks `xmlrpc.php`,
   denies dotfiles and PHP execution inside `wp-content/uploads`.
 * `wp-php/uploads.ini` — upload size/memory PHP overrides.
+* `mu-plugins/` — must-use plugins, bind-mounted into `wp-content/mu-plugins`.
+* `wp-content/themes/quantumai-theme/` — the platform theme (see below).
 * `.env.example` — template for secrets; copy to `.env` (gitignored).
 
 ## First run
@@ -28,7 +30,52 @@ docker compose logs -f wordpress   # wait for it to come up healthy
 ```
 
 Then visit `http://localhost:8080` (or your `HTTP_PORT`) to run the WordPress
-install wizard.
+install wizard, then activate **QuantumAI Educational Theme** under
+Appearance → Themes.
+
+## Theme: QuantumAI Educational Theme
+
+`wp-content/themes/quantumai-theme/` is a from-scratch classic theme
+(bind-mounted into the container, so edits on the host show up immediately —
+no rebuild needed) covering FR-02 (LaTeX) and FR-03 (topic taxonomy):
+
+* **LaTeX rendering (FR-02)** — MathJax is vendored locally at
+  `assets/vendor/mathjax/tex-svg.js` (see `SOURCE.md` next to it for
+  provenance/checksum) rather than pulled from a CDN, so it works under the
+  site's CSP (`script-src 'self'`) with no external requests at render time.
+  It's only enqueued on posts/pages whose content actually contains math
+  (`inc/mathjax.php`), to keep the ~700KB payload off pages that don't need
+  it (NFR-01).
+
+  Authors write equations directly in post content using:
+  * `\( E = mc^2 \)` for inline math
+  * `\[ ... \]` or `$$ ... $$` for display/block equations
+
+  Plain single `$` is intentionally *not* treated as a math delimiter —
+  this is a funding/pricing-heavy news site, so bare `$` shows up in prose
+  far more often than as math. A `[latex]...[/latex]` shortcode is also
+  available as an alternative to the raw delimiters; see the doc comment on
+  `quantumai_latex_shortcode()` in `inc/mathjax.php` for its one caveat
+  (`wpautop` mangles blank lines inside a shortcode — keep multi-line
+  equations to a single line, using `\\` for TeX line breaks).
+
+* **Topic taxonomy (FR-03)** — a `topic` taxonomy is registered
+  (`inc/taxonomies.php`) and seeded on theme activation with the four
+  required terms: Quantum Computing, AI/LLMs/LRMs, Quantum Physics,
+  Post-Quantum Cryptography. `taxonomy.php` provides the archive template
+  (`/topic/quantum-physics/`, etc.).
+
+* **Theme-level hardening (`inc/security.php`)** — hides the WP version
+  string and RSD/WLW discovery links (AS-03 recon reduction), and blocks
+  `?author=<id>` username-enumeration probes (AS-01) at a priority earlier
+  than core's own canonical-redirect handling, which would otherwise resolve
+  the probe to `/author/<username>/` and leak the username before a
+  same-priority hook gets a chance to run.
+
+This theme was built and smoke-tested end-to-end against this compose stack
+(installed WordPress, activated the theme, published math and non-math
+posts, and confirmed MathJax loads only where needed) before being checked
+in; it has not been visually reviewed in a browser.
 
 ## Post-install hardening checklist
 

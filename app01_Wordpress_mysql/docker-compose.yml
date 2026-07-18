@@ -53,6 +53,7 @@ services:
       - wp_data:/var/www/html
       - ./wp-php/uploads.ini:/usr/local/etc/php/conf.d/uploads.ini:ro
       - ./mu-plugins:/var/www/html/wp-content/mu-plugins:ro
+      - ./wp-content/themes/quantumai-theme:/var/www/html/wp-content/themes/quantumai-theme:ro
     networks:
       - internal
       - web
