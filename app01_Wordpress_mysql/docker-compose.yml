@@ -58,6 +58,18 @@ services:
         define('WP_AUTO_UPDATE_CORE', 'minor');
         define('MYSQL_CLIENT_FLAGS', MYSQLI_CLIENT_SSL);
         define('QUANTUMAI_LOGIN_SLUG', getenv('WP_LOGIN_SLUG'));
+        // SR-03: nginx (the sole entry point reachable on the `web` network)
+        // terminates TLS and proxies to us over plain HTTP, setting
+        // X-Forwarded-Proto to whatever scheme the client actually used.
+        // WordPress doesn't trust that header on its own, so without this,
+        // is_ssl() always sees "http" here and FORCE_SSL_ADMIN below would
+        // just redirect-loop. Must live in wp-config.php itself (mu-plugins
+        // load too late — after core has already used is_ssl() for cookie
+        // setup during wp-settings.php's own bootstrap).
+        if ( ! empty( $$_SERVER['HTTP_X_FORWARDED_PROTO'] ) && 'https' === $$_SERVER['HTTP_X_FORWARDED_PROTO'] ) {
+            $$_SERVER['HTTPS'] = 'on';
+        }
+        define('FORCE_SSL_ADMIN', true);
     volumes:
       - wp_data:/var/www/html
       - ./wp-php/uploads.ini:/usr/local/etc/php/conf.d/uploads.ini:ro
@@ -72,10 +84,18 @@ services:
     restart: unless-stopped
     depends_on:
       - wordpress
+    environment:
+      # SR-03: only consumed by the stock nginx image's own
+      # envsubst-on-templates entrypoint step, to bake the externally-published
+      # HTTPS port into the HTTP -> HTTPS redirect (nginx/templates/wordpress.conf.template).
+      HTTPS_PORT: ${HTTPS_PORT:-8443}
     ports:
       - "${HTTP_PORT:-8080}:80"
+      - "${HTTPS_PORT:-8443}:443"
     volumes:
-      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/templates:/etc/nginx/templates:ro
+      - ./nginx/docker-entrypoint.d/40-quantumai-tls-setup.sh:/docker-entrypoint.d/40-quantumai-tls-setup.sh:ro
+      - ./nginx/certs:/etc/nginx/certs
       - wp_data:/var/www/html:ro
       - nginx_cache:/var/cache/nginx
     networks:

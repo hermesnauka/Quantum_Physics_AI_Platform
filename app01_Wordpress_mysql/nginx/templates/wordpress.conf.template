@@ -28,9 +28,41 @@ map $http_cookie $quantumai_cookie_bypass {
     "~*wp-postpass_" 1;
 }
 
+# SR-03: every plain-HTTP request gets redirected straight to HTTPS — nothing
+# else is served on :80. `$host` strips whatever port the client actually
+# connected on, so the explicit `${HTTPS_PORT}` below (baked in at container
+# start by the envsubst-on-templates entrypoint step, from the HTTPS_PORT
+# env var) is what makes this correct for a non-standard port like the 8443
+# used for local dev — a bare "https://$host" would silently imply :443.
 server {
     listen 80;
     server_name _;
+    return 301 https://$host:${HTTPS_PORT}$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name _;
+
+    # SR-03: self-signed for local dev, generated on first container start by
+    # nginx/docker-entrypoint.d/40-quantumai-tls-setup.sh and persisted in the
+    # bind-mounted nginx/certs/ (gitignored). Swap these two files for a
+    # CA-issued cert/key — or terminate TLS at Cloudflare instead and drop
+    # this server block — before this stack is reachable from the public
+    # internet; see the README's "Post-install hardening checklist".
+    ssl_certificate     /etc/nginx/certs/wordpress.crt;
+    ssl_certificate_key /etc/nginx/certs/wordpress.key;
+
+    # TLS 1.3 only, per SR-03's literal wording. Trade-off: a client that
+    # can't do 1.3 (a legacy/embedded HTTP client, not any current browser)
+    # gets a hard handshake failure instead of a 1.2 fallback. Add "TLSv1.2"
+    # here if that ever turns out to matter in practice. No ssl_ciphers list
+    # needed — TLS 1.3's own cipher suite selection is already restricted to
+    # strong AEAD ciphers and isn't tunable via that directive.
+    ssl_protocols TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
 
     client_max_body_size 32m;
 
@@ -121,4 +153,9 @@ server {
     add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
     add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; frame-ancestors 'self';" always;
     add_header X-Cache-Status $upstream_cache_status always;
+    # SR-03: pin browsers to HTTPS for this host going forward. Only sent from
+    # this (the HTTPS) server block — the plain-HTTP one above only ever
+    # returns a redirect, so there's no path where a client sees this over an
+    # unencrypted connection first.
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 }

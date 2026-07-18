@@ -12,6 +12,11 @@
 tmp/
 .local-dev/
 
+# Self-signed TLS cert/key generated at container startup (SR-03, see
+# app01_Wordpress_mysql/nginx/docker-entrypoint.d/) — regenerated per
+# environment, never committed. "**/" for the same reason as .claude/ above.
+**/nginx/certs/
+
 # OS cruft
 .DS_Store
 Thumbs.db

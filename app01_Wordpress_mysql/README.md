@@ -11,8 +11,14 @@ the full Secure SDLC rationale behind the choices below.
 * `db/init/01-create-app-user.sh` — creates a least-privilege MySQL app user
   (no `DROP TABLE`, no `GRANT OPTION`) instead of relying on the MySQL image's
   default all-privileges user.
-* `nginx/conf.d/wordpress.conf` — CSP/security headers, blocks `xmlrpc.php`,
-  denies dotfiles and PHP execution inside `wp-content/uploads`.
+* `nginx/templates/wordpress.conf.template` — CSP/security headers, HTTP→HTTPS
+  redirect and TLS 1.3 termination (SR-03), blocks `xmlrpc.php`, denies
+  dotfiles and PHP execution inside `wp-content/uploads`. Rendered to
+  `/etc/nginx/conf.d/wordpress.conf` at container start by nginx's own
+  envsubst-on-templates entrypoint step.
+* `nginx/docker-entrypoint.d/40-quantumai-tls-setup.sh` — removes the stock
+  image's `default.conf` and generates a self-signed TLS cert/key into
+  `nginx/certs/` (gitignored) on first start, if one isn't already there.
 * `wp-php/uploads.ini` — upload size/memory PHP overrides.
 * `mu-plugins/` — must-use plugins, bind-mounted into `wp-content/mu-plugins`.
 * `wp-content/themes/quantumai-theme/` — the platform theme (see below).
@@ -29,9 +35,11 @@ docker compose up -d
 docker compose logs -f wordpress   # wait for it to come up healthy
 ```
 
-Then visit `http://localhost:8080` (or your `HTTP_PORT`) to run the WordPress
-install wizard, then activate **QuantumAI Educational Theme** under
-Appearance → Themes.
+Then visit `https://localhost:8443` (or your `HTTPS_PORT` — plain
+`http://localhost:8080` also works but immediately 301-redirects there; see
+"TLS / HTTPS" below for why the browser will warn about the certificate) to
+run the WordPress install wizard, then activate **QuantumAI Educational
+Theme** under Appearance → Themes.
 
 ## Theme: QuantumAI Educational Theme
 
@@ -76,6 +84,52 @@ This theme was built and smoke-tested end-to-end against this compose stack
 (installed WordPress, activated the theme, published math and non-math
 posts, and confirmed MathJax loads only where needed) before being checked
 in; it has not been visually reviewed in a browser.
+
+## TLS / HTTPS (SR-03)
+
+All data in transit is encrypted with TLS 1.3, terminated at nginx (not a
+mu-plugin — this is infrastructure config, not something a WordPress plugin
+can do):
+
+* Every plain-HTTP request on `HTTP_PORT` gets a 301 to the same host on
+  `HTTPS_PORT` — nothing is ever served over the unencrypted port.
+* nginx generates a self-signed certificate on first `docker compose up`
+  (`nginx/docker-entrypoint.d/40-quantumai-tls-setup.sh`) and persists it in
+  `nginx/certs/` (gitignored) so it survives restarts. Your browser will warn
+  about this cert — that's expected for local dev; replace the two files in
+  `nginx/certs/` with a CA-issued cert/key (or front the stack with
+  Cloudflare/another TLS-terminating proxy instead and drop the `443 ssl`
+  server block) before this is reachable from the public internet.
+* `ssl_protocols` is pinned to `TLSv1.3` only, per SR-03's literal wording —
+  see the comment in the template for the compatibility trade-off.
+* WordPress is told to trust nginx's `X-Forwarded-Proto` header (only safe
+  because nginx is this stack's sole entry point — same reasoning as
+  `get_client_ip()` in the audit-log/brute-force-protection mu-plugins) and
+  `FORCE_SSL_ADMIN` is set, so wp-admin/login always redirect to HTTPS even
+  if something upstream ever forwards a plain-HTTP request directly.
+* HSTS (`Strict-Transport-Security`) is sent on every HTTPS response.
+
+## Input/output validation (SR-04)
+
+Also not a mu-plugin — covered by existing conventions rather than new code:
+
+* **Comments** — WordPress core sanitizes comment content server-side
+  (`wp_kses` via the `pre_comment_content`/`comment_text` filters), and the
+  theme's `comments.php` renders everything through `wp_list_comments()`'s
+  own escaping (see the doc comment at the top of that file). Combined with
+  the CSP header and `anti-bot.php`'s honeypot on the comment form, that's
+  AS-02/SR-04 covered by defaults, not custom code.
+* **Contact forms** — SR-04 names these explicitly, but no contact-form
+  feature exists yet (it's not in REQUIREMENTS.md's Functional
+  Requirements). If one is ever added: server-side sanitization
+  (`sanitize_text_field()`/`sanitize_textarea_field()`/`sanitize_email()`),
+  late-escaping on any admin-facing display, and the honeypot pattern from
+  `mu-plugins/anti-bot.php` are all required before it ships, not optional
+  hardening to add later.
+* **Everywhere else** — the theme has no raw `$_GET`/`$_POST`/`$_REQUEST`
+  output anywhere (checked by grep across `wp-content/themes/quantumai-theme/`);
+  the one place a request param is read (`inc/security.php`'s
+  author-enumeration block) only calls `isset()` on it, never echoes it.
 
 ## Security mu-plugins (SR-01, SR-02, SR-05, SR-06, AS-01)
 
@@ -130,10 +184,14 @@ still need to be done in the WordPress admin per
 
 * Remove the default `admin` username if one exists — `hide-login.php`
   will flag it in the dashboard, but won't delete it for you.
-* Put the stack behind Cloudflare (or similar) for WAF/TLS termination/DDoS
-  protection in any environment reachable from the public internet — this compose
-  file serves plain HTTP on `HTTP_PORT` and is meant for local development /
-  behind a TLS-terminating proxy, not direct internet exposure.
+* Replace the self-signed cert in `nginx/certs/` with a CA-issued one (Let's
+  Encrypt, your org's CA, etc.) — or put the stack behind Cloudflare (or
+  similar) for WAF/DDoS protection and TLS termination instead, dropping the
+  `443 ssl` server block from `nginx/templates/wordpress.conf.template` so
+  nginx isn't also doing it — in any environment reachable from the public
+  internet. As shipped, this compose file terminates TLS itself with a
+  cert nobody's browser will trust by default, which is fine for local
+  development but not for direct internet exposure.
 
 ## Notes on the security choices baked into this scaffold
 
@@ -150,3 +208,9 @@ still need to be done in the WordPress admin per
   (`xmlrpc_enabled` filter).
 * **No in-dashboard file editing** — `DISALLOW_FILE_EDIT` is set, closing off
   one of the more common post-compromise persistence paths.
+* **Client-facing TLS (SR-03)** — nginx terminates TLS 1.3 with a
+  self-signed cert generated on first start, same "generate one if none
+  exists" pattern as MySQL's own cert above. Chosen over requiring a real
+  cert up front so the stack still works out of the box for local dev; the
+  trade-off is the browser cert warning until that self-signed cert is
+  swapped out per the hardening checklist.
