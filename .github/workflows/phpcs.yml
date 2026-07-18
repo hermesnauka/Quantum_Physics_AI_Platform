@@ -1,0 +1,43 @@
+# PLAN.md Phase 4 SAST: PHPCS + WordPress Coding Standards on every push/PR
+# that touches app01_Wordpress_mysql's own code (mu-plugins/theme — not
+# WordPress core, not the vendored MathJax build).
+name: PHPCS (SAST)
+
+on:
+  push:
+    paths:
+      - "app01_Wordpress_mysql/mu-plugins/**"
+      - "app01_Wordpress_mysql/wp-content/themes/quantumai-theme/**"
+      - "app01_Wordpress_mysql/composer.*"
+      - "app01_Wordpress_mysql/phpcs.xml.dist"
+      - ".github/workflows/phpcs.yml"
+  pull_request:
+    paths:
+      - "app01_Wordpress_mysql/mu-plugins/**"
+      - "app01_Wordpress_mysql/wp-content/themes/quantumai-theme/**"
+      - "app01_Wordpress_mysql/composer.*"
+      - "app01_Wordpress_mysql/phpcs.xml.dist"
+      - ".github/workflows/phpcs.yml"
+
+jobs:
+  phpcs:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app01_Wordpress_mysql
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          tools: composer:2
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: app01_Wordpress_mysql/vendor
+          key: ${{ runner.os }}-composer-${{ hashFiles('app01_Wordpress_mysql/composer.lock') }}
+
+      - run: composer install --no-interaction --no-progress
+      - run: vendor/bin/phpcs

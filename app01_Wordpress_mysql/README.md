@@ -8,10 +8,19 @@ the full Secure SDLC rationale behind the choices below.
 
 * `docker-compose.yml` — `db` (MySQL 8.0), `wordpress` (WP + PHP-Apache), `nginx`
   (`owasp/modsecurity-crs:nginx` — reverse proxy, TLS termination, WAF,
-  security headers, XML-RPC block), `wpscan` (opt-in DAST scan profile).
+  security headers, XML-RPC block), `wpscan` (opt-in DAST scan profile),
+  `phpcs` (opt-in SAST lint profile), `backup` (opt-in encrypted backup
+  profile).
+* `composer.json` / `composer.lock` / `phpcs.xml.dist` — dev-tooling only
+  (SAST); the runtime app has no Composer dependencies.
 * `db/init/01-create-app-user.sh` — creates a least-privilege MySQL app user
   (no `DROP TABLE`, no `GRANT OPTION`) instead of relying on the MySQL image's
   default all-privileges user.
+* `db/init/02-create-backup-user.sh` / `03-create-restore-user.sh` — create
+  a strictly read-only MySQL user for the `backup` profile and a separate
+  write+`DROP` user for restores. See "Backups (PLAN.md Phase 6)" below.
+* `backup/run-backup.sh` / `backup/restore.sh` — the `backup` profile's dump
+  script and the operator-run decrypt/restore helper.
 * `nginx/waf/default.conf.template` — CSP/security headers, HTTP→HTTPS
   redirect and TLS 1.3 termination (SR-03), ModSecurity/CRS (AS-03), blocks
   `xmlrpc.php`, denies dotfiles and PHP execution inside `wp-content/uploads`.
@@ -240,6 +249,45 @@ CORS handling, real-IP handling — is untouched upstream default.
   the host-side mapping (`HTTP_PORT`/`HTTPS_PORT`) is unchanged, so
   `https://localhost:8443` still works exactly as before.
 
+## Static analysis / coding standards (PLAN.md Phase 4 SAST)
+
+`docker compose --profile sast run --rm phpcs` runs PHPCS + WordPress
+Coding Standards against `mu-plugins/` and the theme (`phpcs.xml.dist`;
+`composer.json`/`composer.lock` are dev-tooling only — the runtime app has
+no Composer dependencies, by design, same as it has no third-party
+plugins). Also wired into CI: `.github/workflows/phpcs.yml` runs it on every
+push/PR touching those paths.
+
+Ruleset is `WordPress-Extra` with one exclusion (`WordPress.Files.FileName`
+— several mu-plugins deliberately bundle a small class in one file, the
+project's own stated convention, not a mistake). Running this for the first
+time on this codebase caught real, fixed issues, not just style noise:
+
+* **Three broken `phpcs:ignore` suppressions** in the audit log — placed on
+  the line that *built* a SQL string instead of the line that *used* it
+  (where PHPCS actually reports the violation), and one referencing the
+  wrong sniff name (`NotPrepared` instead of `InterpolatedNotPrepared`).
+  The underlying SQL was always safe (only a fixed table-name constant gets
+  interpolated, confirmed by inspection — see the AS-04 note above), but the
+  suppressions documenting that safety silently did nothing.
+* **A real i18n bug** — a table's column headers were translated with
+  `esc_html__( $col, 'quantumai' )` inside a loop over a plain string array.
+  WordPress's string-extraction tooling can't pick up a variable passed to
+  a translation function, so those strings could never actually reach a
+  `.pot` file despite looking translatable. Fixed by translating each
+  literal individually.
+* **A `$term` template variable** in `taxonomy.php` that WordPress's own
+  template loader `require`s from global scope — meaning it really was
+  writing into `$GLOBALS['term']`, not a locally-scoped variable, with real
+  collision potential. Renamed to `$qa_term`.
+* Everything else was either auto-fixed by `phpcbf` (pure formatting: equals-
+  sign/array-arrow alignment, post-increment style) or a scoped
+  `phpcs:ignore`/`phpcs:disable` with a specific reason — mostly
+  `NonceVerification` warnings on read-only, capability-gated GET filters
+  (a nonce protects a state change; these views don't have one) and on
+  fields this project's own signed-token/honeypot mechanisms already
+  protect in a different, equally valid way.
+
 ## Vulnerability scanning (AS-03)
 
 `docker compose --profile scan run --rm wpscan` runs a WPScan DAST pass
@@ -263,6 +311,162 @@ writes a timestamped JSON report to `security-reports/` (gitignored).
   runner — check the first scheduled/dispatched run's logs before trusting
   it unattended.
 
+## Backups (PLAN.md Phase 6)
+
+`docker compose --profile backup run --rm backup` runs a full backup pass
+(`backup/run-backup.sh`; gated behind the `backup` compose profile, same
+opt-in shape as `wpscan`/`phpcs` — never runs on a plain `docker compose
+up`). Two age-encrypted artifacts land in `backups/` (gitignored) per run:
+
+* `db-<timestamp>.sql.gz.age` — a `mysqldump --single-transaction` of the
+  whole database (an InnoDB-consistent snapshot, no locking needed),
+  connecting as a dedicated read-only `BACKUP_DB_USER`
+  (`db/init/02-create-backup-user.sh` — `SELECT, LOCK TABLES, SHOW VIEW,
+  EVENT, TRIGGER` only; no `INSERT/UPDATE/DELETE/CREATE/ALTER/DROP/GRANT`,
+  so a compromised backup container still can't modify or destroy data).
+* `uploads-<timestamp>.tar.gz.age` — `wp-content/uploads/`, the only
+  non-reproducible content inside the `wp_data` volume (core is
+  reproducible from the `wordpress:php8.3-apache` image tag; the theme and
+  mu-plugins are already bind-mounted from this git repo).
+
+Both are encrypted with [age](https://age-encryption.org) (a single static
+binary, recipient-based — no keyring/trust-database to manage), not GPG,
+for the same reason MFA/the audit log/anti-bot are hand-rolled instead of
+third-party plugins: less unnecessary complexity and supply-chain surface.
+
+**Setup**:
+* Generate your own keypair *outside this repo* — this project never
+  generates, stores, or handles the private key:
+  ```
+  age-keygen -o backup-key.txt
+  ```
+  Paste the printed `# public key: age1...` value into `.env`'s
+  `BACKUP_AGE_RECIPIENT`. Keep `backup-key.txt` itself somewhere safe and
+  offline (password manager, offline USB) — losing it makes every backup
+  permanently unreadable; treat it with at least `MYSQL_ROOT_PASSWORD`-level
+  care.
+* First run needs `mkdir -p backups && chmod 777 backups` if it doesn't
+  already exist with open permissions — same class of issue as
+  `security-reports/`, except here it's moot in practice: the `backup`
+  service's `alpine` image runs as root by default (see Known gaps below),
+  so it can actually write into a root-owned bind-mount target Docker
+  auto-creates. Do it anyway, since relying on that is exactly the kind of
+  assumption this project tries not to make.
+* Retention: `BACKUP_RETENTION_DAYS` (default 30) — local artifacts older
+  than this are pruned at the end of every run, mirroring the audit-log
+  mu-plugin's own retention pattern. Independent of any S3-side lifecycle
+  window (see below).
+
+**Restore** (`backup/restore.sh`, operator-run — never automatic): reuses
+the `backup` service so it inherits network access to the `internal`-only
+`db` without publishing MySQL's port:
+```
+docker compose --profile backup run --rm \
+  -v /secure/path/to/backup-key.txt:/keys/backup-key.txt:ro \
+  --entrypoint /bin/sh \
+  backup /backup/restore.sh /backups/db-20260718-030000.sql.gz.age /keys/backup-key.txt
+```
+Restores as a fourth, dedicated `RESTORE_DB_USER`
+(`db/init/03-create-restore-user.sh`) — **not** `WP_DB_USER` and not
+`BACKUP_DB_USER`. This was the approved design's original plan (reuse the
+app user), but actually running it surfaced two independent reasons that
+doesn't work: `WP_DB_USER` (and `root`) authenticate with MySQL 8's default
+`caching_sha2_password` plugin, which the `mariadb-client` package this
+container installs cannot load at all (confirmed: `Plugin
+caching_sha2_password could not be loaded`, and Alpine has no package that
+provides it); and `WP_DB_USER` deliberately lacks `DROP`
+(`db/init/01-create-app-user.sh`), which a full-dump restore needs since
+`mysqldump`'s output includes `DROP TABLE IF EXISTS` before every
+`CREATE TABLE`. Rather than change `WP_DB_USER`'s or root's live auth
+plugin, `RESTORE_DB_USER` is `mysql_native_password` (like `BACKUP_DB_USER`)
+with write+`DROP` privileges, used only interactively by this script, never
+by the running application. Override with `MYSQL_RESTORE_USER`/
+`MYSQL_RESTORE_PASSWORD` only if you have a specific reason to restore as a
+different user. The decrypted SQL dump is written to a scratch dir and
+deleted the moment the import finishes — it never lingers on disk.
+
+For an `uploads-*.tar.gz.age` file, the same script decrypts/extracts into
+`backups/restore-scratch-<timestamp>/` (under the bind-mounted `backups/`
+directory, i.e. on your **host**, not a container-local path) and prints a
+`docker cp` command to copy the result into the running `wordpress`
+container. This was originally a container-local `mktemp -d` path — fixed
+after actually running it and discovering the obvious problem: this
+container runs with `--rm`, so it (and everything extracted into it) is
+gone by the time an operator could read and act on the printed command.
+That scratch dir is deliberately *not* auto-deleted (you still need to
+`docker cp` out of it first) — remove it yourself once done. Its contents
+retain their original ownership from inside the `wordpress` container
+(typically `www-data`), so deleting it as a non-root host user may need
+`sudo rm -rf` or an equivalent, not a plain `rm -rf`.
+
+**Optional off-site upload**: via `rclone` (a single static binary, no
+Python runtime, unlike `aws-cli`), attempted only if `AWS_ACCESS_KEY_ID`
+and `BACKUP_S3_BUCKET` are both set — otherwise the run completes
+local-only with a log message, never a hard failure.
+
+**Verification**: the local dump → encrypt → decrypt → restore round trip
+is exercised by `.github/workflows/backup-roundtrip.yml` on every push/PR
+touching these files — it inserts a known marker row, backs up, destroys
+the table, restores, and asserts the row survived. No AWS credentials
+needed, since it only proves the local path. Like the other CI workflows
+here, it was authored and reasoned through carefully but not run against a
+live GitHub Actions runner from this environment — check the first run's
+logs before trusting it. **The S3 upload leg has not been run against a
+real bucket at all** (no AWS account available here) and must be confirmed
+by someone with real credentials before being trusted.
+
+**Scheduling**: deliberately *not* a GitHub Actions cron job, unlike
+`wpscan-weekly.yml` — a backup has to run against the real, persistent
+host and volumes, which an ephemeral CI runner doesn't have anything
+meaningful to back up. Schedule it on the host itself instead, e.g. a
+crontab entry:
+```
+0 3 * * * cd /path/to/app01_Wordpress_mysql && docker compose --profile backup run --rm backup
+```
+Illustrative only — installing it on a real host is the operator's own
+responsibility.
+
+**Known gaps** (documented, not silently omitted):
+* **No true incremental backups** — this is a full dump every run. Real
+  incremental needs binlog-position-based tooling and binary logging
+  enabled on `db` (it isn't). Accepted as a permanent scope limit for a
+  local dev/educational stack at this scale, not a TODO.
+* **S3 Object Lock is entirely bucket-level** — it must be enabled at
+  bucket creation (requires versioning) plus a default retention policy;
+  this script only uploads objects, it never sets lock headers itself.
+  Unverified here — no AWS account available to confirm the bucket side
+  actually behaves as described.
+* **The `backup` container runs as root** (plain `alpine`, needs to
+  `apk add` packages at runtime) — a lower privilege posture than the rest
+  of this least-privilege-focused stack. Flagged as a future hardening
+  candidate (a small custom Dockerfile, non-root user, pre-baked packages),
+  not glossed over.
+* **Runtime `apk add` on every run** means even a local-only backup
+  currently needs to reach Alpine's package mirrors over the internet. A
+  one-line custom Dockerfile would remove this if it proves flaky in
+  practice — deliberately not done by default, to stay consistent with the
+  "reuse an off-the-shelf image" precedent `wpscan`/`phpcs` already set.
+* **`mariadb-client`/MySQL-8-server compatibility** — actually running
+  Alpine's `mariadb-client` against this stack's `mysql:8.0` server (not
+  assumed from documentation) surfaced three real, now-fixed
+  incompatibilities: MySQL 8's `--ssl-mode`/`--set-gtid-purged` flags don't
+  exist on `mariadb-dump` (use `--ssl` instead, and just drop
+  `--set-gtid-purged` — this stack doesn't use GTIDs and `mariadb-dump`
+  doesn't emit that statement anyway); dumping without `--no-tablespaces`
+  produces a benign-but-alarming `PROCESS privilege` error on every run;
+  and — the big one — `mariadb-client` cannot load MySQL 8's default
+  `caching_sha2_password` auth plugin at all, which is why `BACKUP_DB_USER`
+  and `RESTORE_DB_USER` are both explicitly created with
+  `mysql_native_password` instead (see `db/init/03-create-restore-user.sh`'s
+  doc comment for the full story). `WP_DB_USER` and `root` are untouched —
+  still `caching_sha2_password`, since WordPress's own PHP drivers handle it
+  fine and this project didn't want to change the live app's auth setup as
+  a side effect of adding backups.
+* `db/init/02-create-backup-user.sh` and `03-create-restore-user.sh`, like
+  `01-create-app-user.sh`, only run against a **fresh** `db_data` volume —
+  an existing volume needs the `CREATE USER`/`GRANT` run manually
+  (`docker exec` into `db` with `mysql -uroot`).
+
 ## Post-install hardening checklist
 
 These are infrastructure-level defaults and mu-plugins only; the following
@@ -283,6 +487,11 @@ still need to be done in the WordPress admin per
   exposure.
 * Get a WPScan API token (`WPSCAN_API_TOKEN` in `.env` and as a GitHub
   Actions repo secret) so the AS-03 scanning described below actually runs.
+* Generate a real `age` keypair and set `BACKUP_AGE_RECIPIENT`, and schedule
+  `docker compose --profile backup run --rm backup` on the actual host (a
+  crontab entry, not GitHub Actions) so PLAN.md Phase 6 backups actually
+  happen — see "Backups" above. Store the private key safely and offline;
+  this project never does that for you.
 
 ## Notes on the security choices baked into this scaffold
 

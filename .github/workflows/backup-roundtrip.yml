@@ -1,0 +1,146 @@
+# PLAN.md Phase 6 backup verification. Spins up a throwaway instance of the
+# app01_Wordpress_mysql stack (same pattern as wpscan-weekly.yml), inserts a
+# known marker row, runs the `backup` profile, destroys the marker table,
+# restores from the encrypted backup, and asserts the marker row survived.
+#
+# Deliberately does NOT test the S3 upload leg — that needs a real AWS
+# account/bucket this environment doesn't have, and never will inside a
+# public CI runner without secrets configured for it. What this DOES prove,
+# with no secrets required at all, is the one part of this feature that
+# actually can be proven correct in CI: the local dump -> encrypt -> decrypt
+# -> restore round trip.
+#
+# NOTE (unverified): authored and reasoned through, but not run against a
+# real GitHub Actions runner from this environment — no way to execute a
+# workflow_dispatch from here. Sanity-check the first run's logs before
+# trusting this unattended, same caveat as wpscan-weekly.yml.
+name: Backup round-trip (PLAN.md Phase 6)
+
+on:
+  push:
+    paths:
+      - "app01_Wordpress_mysql/backup/**"
+      - "app01_Wordpress_mysql/db/init/**"
+      - "app01_Wordpress_mysql/docker-compose.yml"
+      - ".github/workflows/backup-roundtrip.yml"
+  pull_request:
+    paths:
+      - "app01_Wordpress_mysql/backup/**"
+      - "app01_Wordpress_mysql/db/init/**"
+      - "app01_Wordpress_mysql/docker-compose.yml"
+      - ".github/workflows/backup-roundtrip.yml"
+  workflow_dispatch: {}
+
+jobs:
+  backup-roundtrip:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app01_Wordpress_mysql
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create a throwaway .env for this ephemeral stack
+        run: |
+          cp .env.example .env
+
+          WP_DB_PASSWORD_VAL="$(openssl rand -hex 16)"
+          BACKUP_DB_PASSWORD_VAL="$(openssl rand -hex 16)"
+          RESTORE_DB_PASSWORD_VAL="$(openssl rand -hex 16)"
+          MYSQL_ROOT_PASSWORD_VAL="$(openssl rand -hex 16)"
+
+          sed -i "s#^MYSQL_ROOT_PASSWORD=.*#MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD_VAL}#" .env
+          sed -i "s#^WP_DB_PASSWORD=.*#WP_DB_PASSWORD=${WP_DB_PASSWORD_VAL}#" .env
+          sed -i "s#^BACKUP_DB_PASSWORD=.*#BACKUP_DB_PASSWORD=${BACKUP_DB_PASSWORD_VAL}#" .env
+          sed -i "s#^RESTORE_DB_PASSWORD=.*#RESTORE_DB_PASSWORD=${RESTORE_DB_PASSWORD_VAL}#" .env
+          for key in WORDPRESS_AUTH_KEY WORDPRESS_SECURE_AUTH_KEY WORDPRESS_LOGGED_IN_KEY WORDPRESS_NONCE_KEY WORDPRESS_AUTH_SALT WORDPRESS_SECURE_AUTH_SALT WORDPRESS_LOGGED_IN_SALT WORDPRESS_NONCE_SALT; do
+            sed -i "s#^${key}=.*#${key}=$(openssl rand -hex 32)#" .env
+          done
+
+          # Only needed in later steps of THIS job, never committed or
+          # logged — GITHUB_ENV is scoped to this workflow run.
+          {
+            echo "MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD_VAL}"
+            echo "BACKUP_DB_PASSWORD=${BACKUP_DB_PASSWORD_VAL}"
+            echo "RESTORE_DB_PASSWORD=${RESTORE_DB_PASSWORD_VAL}"
+          } >> "$GITHUB_ENV"
+
+          mkdir -p backups
+          chmod 777 backups
+
+      - name: Generate a throwaway age keypair for this run
+        run: |
+          docker run --rm -v "$PWD:/out" alpine:3.20 sh -c \
+            "apk add --no-cache --quiet age && age-keygen -o /out/ci-backup-key.txt && chmod 644 /out/ci-backup-key.txt"
+          PUBLIC_KEY="$(grep '# public key:' ci-backup-key.txt | sed 's/# public key: //')"
+          sed -i "s#^BACKUP_AGE_RECIPIENT=.*#BACKUP_AGE_RECIPIENT=${PUBLIC_KEY}#" .env
+
+      - name: Start the stack
+        run: docker compose up -d
+
+      - name: Wait for MySQL to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            if docker compose exec -T db mysqladmin ping -h localhost -uroot -p"$MYSQL_ROOT_PASSWORD" --silent; then
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "MySQL never came up in time" >&2
+          docker compose logs
+          exit 1
+
+      - name: Manually run the backup-user and restore-user init scripts
+        # docker-entrypoint-initdb.d scripts only run against a FRESH
+        # db_data volume, which this ephemeral stack's first boot already
+        # satisfies in practice — but run them explicitly rather than
+        # assume, since a cached/reused volume between job attempts would
+        # otherwise silently skip user creation and fail every step after
+        # this one.
+        run: |
+          docker compose exec -T db sh -c \
+            'MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" MYSQL_DATABASE="$MYSQL_DATABASE" BACKUP_DB_USER="$BACKUP_DB_USER" BACKUP_DB_PASSWORD="$BACKUP_DB_PASSWORD" /docker-entrypoint-initdb.d/02-create-backup-user.sh'
+          docker compose exec -T db sh -c \
+            'MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" MYSQL_DATABASE="$MYSQL_DATABASE" RESTORE_DB_USER="$RESTORE_DB_USER" RESTORE_DB_PASSWORD="$RESTORE_DB_PASSWORD" /docker-entrypoint-initdb.d/03-create-restore-user.sh'
+
+      - name: Insert a known marker row
+        run: |
+          docker compose exec -T db mysql -uroot -p"$MYSQL_ROOT_PASSWORD" quantumai_wp -e \
+            "CREATE TABLE ci_roundtrip_marker (id INT PRIMARY KEY, note VARCHAR(64)); INSERT INTO ci_roundtrip_marker VALUES (1, 'roundtrip-ok');"
+
+      - name: Run the backup
+        run: docker compose --profile backup run --rm backup
+
+      - name: Confirm an encrypted DB backup artifact was produced
+        run: |
+          ls -la backups/
+          test -n "$(ls backups/db-*.sql.gz.age 2>/dev/null)" || (echo "No db-*.sql.gz.age produced" >&2; exit 1)
+
+      - name: Destroy the marker table (simulate data loss)
+        run: |
+          docker compose exec -T db mysql -uroot -p"$MYSQL_ROOT_PASSWORD" quantumai_wp -e \
+            "DROP TABLE ci_roundtrip_marker;"
+
+      - name: Restore from the encrypted backup
+        # No MYSQL_RESTORE_USER/PASSWORD override needed — restore.sh
+        # defaults to RESTORE_DB_USER/RESTORE_DB_PASSWORD, which the
+        # `backup` service already has from .env (docker-compose.yml).
+        run: |
+          BACKUP_FILE="$(basename "$(ls backups/db-*.sql.gz.age | head -1)")"
+          docker compose --profile backup run --rm \
+            -v "$PWD/ci-backup-key.txt:/keys/backup-key.txt:ro" \
+            --entrypoint /bin/sh \
+            backup /backup/restore.sh "/backups/$BACKUP_FILE" /keys/backup-key.txt
+
+      - name: Assert the marker row survived the round trip
+        run: |
+          RESULT="$(docker compose exec -T db mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -s quantumai_wp -e "SELECT note FROM ci_roundtrip_marker WHERE id = 1;")"
+          if [ "$RESULT" != "roundtrip-ok" ]; then
+            echo "Marker row did not survive the backup/restore round trip (got: '$RESULT')" >&2
+            exit 1
+          fi
+          echo "Backup/restore round trip verified: marker row survived."
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

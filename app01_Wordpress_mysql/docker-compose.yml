@@ -14,6 +14,13 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE:?set MYSQL_DATABASE in .env}
       WP_DB_USER: ${WP_DB_USER:?set WP_DB_USER in .env}
       WP_DB_PASSWORD: ${WP_DB_PASSWORD:?set WP_DB_PASSWORD in .env}
+      # Read by db/init/02-create-backup-user.sh (PLAN.md Phase 6).
+      BACKUP_DB_USER: ${BACKUP_DB_USER:?set BACKUP_DB_USER in .env}
+      BACKUP_DB_PASSWORD: ${BACKUP_DB_PASSWORD:?set BACKUP_DB_PASSWORD in .env}
+      # Read by db/init/03-create-restore-user.sh (PLAN.md Phase 6) — see
+      # that script's doc comment for why restoring can't reuse WP_DB_USER.
+      RESTORE_DB_USER: ${RESTORE_DB_USER:?set RESTORE_DB_USER in .env}
+      RESTORE_DB_PASSWORD: ${RESTORE_DB_PASSWORD:?set RESTORE_DB_PASSWORD in .env}
     # Require TLS for all client connections (SR-03 / PLAN Phase 2 "Encrypted database
     # connections"). MySQL 8 auto-generates a self-signed CA/cert/key in the data
     # directory on first boot if none are supplied.
@@ -158,7 +165,52 @@ services:
       - ./mu-plugins:/app/mu-plugins:ro
       - ./wp-content/themes/quantumai-theme:/app/wp-content/themes/quantumai-theme:ro
     entrypoint: ["/bin/sh", "-c"]
-    command: "composer install --no-interaction --no-progress --quiet && vendor/bin/phpcs"
+    # A single-element list, not a plain string: Compose shlex-splits a plain
+    # string command on whitespace before handing it to the entrypoint,
+    # which silently truncated everything after "&&" here (learned by
+    # actually running this — `docker compose config` showed the command
+    # list ending at "--quiet", with "&& vendor/bin/phpcs" dropped entirely).
+    command: ["composer install --no-interaction --no-progress --quiet && vendor/bin/phpcs"]
+
+  # PLAN.md Phase 6 "Daily ... full database/file backups securely stored
+  # in an off-site, immutable storage (S3 with object lock)". Opt-in, same
+  # as wpscan/phpcs — not started by a plain `docker compose up`:
+  #   docker compose --profile backup run --rm backup
+  # Scope: full backups only, daily (no true incremental); S3 upload is
+  # best-effort and skipped gracefully if unconfigured. See README
+  # "Backups" for the restore procedure and the full list of known gaps
+  # (this hasn't been run against a real S3 bucket from this environment).
+  backup:
+    image: alpine:3.20
+    profiles: ["backup"]
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/backup/run-backup.sh"]
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?set MYSQL_DATABASE in .env}
+      BACKUP_DB_USER: ${BACKUP_DB_USER:?set BACKUP_DB_USER in .env}
+      BACKUP_DB_PASSWORD: ${BACKUP_DB_PASSWORD:?set BACKUP_DB_PASSWORD in .env}
+      BACKUP_AGE_RECIPIENT: ${BACKUP_AGE_RECIPIENT:?set BACKUP_AGE_RECIPIENT in .env}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+      # Read by backup/restore.sh as its default restore user (only used
+      # when the entrypoint is overridden to run a manual restore, never by
+      # a plain `docker compose --profile backup run --rm backup`).
+      RESTORE_DB_USER: ${RESTORE_DB_USER:?set RESTORE_DB_USER in .env}
+      RESTORE_DB_PASSWORD: ${RESTORE_DB_PASSWORD:?set RESTORE_DB_PASSWORD in .env}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-quantumai-wp}
+    volumes:
+      - ./backup/run-backup.sh:/backup/run-backup.sh:ro
+      - ./backup/restore.sh:/backup/restore.sh:ro
+      - wp_data:/var/www/html:ro
+      - ./backups:/backups
+    networks:
+      - internal
+      - web
 
 networks:
   # DB <-> WordPress only. Marked internal so the database is unreachable from the

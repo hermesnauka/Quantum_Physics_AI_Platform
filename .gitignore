@@ -12,13 +12,17 @@
 tmp/
 .local-dev/
 
-# Self-signed TLS cert/key generated at container startup (SR-03, see
-# app01_Wordpress_mysql/nginx/docker-entrypoint.d/) — regenerated per
-# environment, never committed. "**/" for the same reason as .claude/ above.
+# Self-signed TLS cert/key generated at container startup (SR-03, by the
+# owasp/modsecurity-crs:nginx image itself) — regenerated per environment,
+# never committed. "**/" for the same reason as .claude/ above.
 **/nginx/certs/
 
 # WPScan output (AS-03) — local scan artifacts, not something to version.
 **/security-reports/
+
+# Encrypted local backup artifacts (PLAN.md Phase 6) — not something to
+# version, same reasoning as security-reports/ above.
+**/backups/
 
 # OS cruft
 .DS_Store
