@@ -9,6 +9,16 @@ services:
   db:
     image: mysql:8.0
     restart: unless-stopped
+    # PLAN.md Phase 5 "Server Hardening" — the closest container-native
+    # equivalent to host-level SELinux/AppArmor MAC for a docker-compose
+    # stack (see README "Deployment & hardening" for the fuller picture).
+    # Blocks a process from gaining privileges beyond what it starts with
+    # (e.g. via a setuid binary), even if the container itself is fully
+    # compromised. Confirmed safe on every service in this file by actually
+    # restarting each one and re-running its normal workflow — none of them
+    # rely on privilege escalation during regular operation.
+    security_opt:
+      - no-new-privileges:true
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
       MYSQL_DATABASE: ${MYSQL_DATABASE:?set MYSQL_DATABASE in .env}
@@ -39,6 +49,8 @@ services:
   wordpress:
     image: wordpress:php8.3-apache
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       db:
         condition: service_healthy
@@ -77,9 +89,23 @@ services:
             $$_SERVER['HTTPS'] = 'on';
         }
         define('FORCE_SSL_ADMIN', true);
+    # PLAN.md Phase 5 "wp-config.php secured at 400 or 440, owned by the web
+    # user" — the stock image leaves it 644. See the wrapper script's own
+    # comment for how/why it's a two-pass call into the image's own
+    # entrypoint rather than a fork of it.
+    #
+    # command is required here, not just entrypoint: overriding entrypoint
+    # in Compose clears the image's own default CMD ("apache2-foreground")
+    # unless it's respecified — confirmed by actually running this without
+    # it, which produced a container that exited immediately with code 0
+    # and looped restarting, since the wrapper's own `exec ... "$@"` had
+    # nothing to exec.
+    entrypoint: ["/wp-hardening/docker-entrypoint-wrapper.sh"]
+    command: ["apache2-foreground"]
     volumes:
       - wp_data:/var/www/html
       - ./wp-php/uploads.ini:/usr/local/etc/php/conf.d/uploads.ini:ro
+      - ./wp-php/docker-entrypoint-wrapper.sh:/wp-hardening/docker-entrypoint-wrapper.sh:ro
       - ./mu-plugins:/var/www/html/wp-content/mu-plugins:ro
       - ./wp-content/themes/quantumai-theme:/var/www/html/wp-content/themes/quantumai-theme:ro
     networks:
@@ -93,6 +119,8 @@ services:
   nginx:
     image: owasp/modsecurity-crs:nginx
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       - wordpress
     environment:
@@ -114,6 +142,13 @@ services:
       ANOMALY_INBOUND: 5
       ANOMALY_OUTBOUND: 4
       MODSEC_RULE_ENGINE: "On"
+      # PLAN.md Phase 5 Fail2Ban: the image's own default ACCESSLOG is a
+      # symlink to /dev/stdout (confirmed by exec'ing into the container),
+      # which only a container-log reader (docker logs / the json-file log
+      # driver) can consume — not a real file a host-level Fail2Ban process
+      # can tail. Point it at a real bind-mounted path instead so
+      # security/fail2ban/ (see README) has something to read.
+      ACCESSLOG: /var/log/quantumai/access.log
     ports:
       - "${HTTP_PORT:-8080}:8080"
       - "${HTTPS_PORT:-8443}:8443"
@@ -129,6 +164,7 @@ services:
       - ./nginx/certs:/etc/nginx/conf
       - wp_data:/var/www/html:ro
       - nginx_cache:/var/cache/nginx
+      - ./nginx/logs:/var/log/quantumai
     networks:
       - web
 
@@ -139,6 +175,8 @@ services:
   wpscan:
     image: wpscanteam/wpscan:latest
     profiles: ["scan"]
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       - nginx
     environment:
@@ -156,6 +194,8 @@ services:
   phpcs:
     image: composer:2
     profiles: ["sast"]
+    security_opt:
+      - no-new-privileges:true
     working_dir: /app
     volumes:
       - ./composer.json:/app/composer.json:ro
@@ -183,6 +223,8 @@ services:
   backup:
     image: alpine:3.20
     profiles: ["backup"]
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       db:
         condition: service_healthy

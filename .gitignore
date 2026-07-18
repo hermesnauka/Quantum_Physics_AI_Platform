@@ -24,6 +24,10 @@ tmp/
 # version, same reasoning as security-reports/ above.
 **/backups/
 
+# Real nginx access log (PLAN.md Phase 5, for host-level Fail2Ban to read)
+# — local runtime data, not something to version.
+**/nginx/logs/
+
 # OS cruft
 .DS_Store
 Thumbs.db

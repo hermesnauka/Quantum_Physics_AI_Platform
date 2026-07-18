@@ -30,8 +30,16 @@ the full Secure SDLC rationale behind the choices below.
   extension points for scoped false-positive exclusions (empty; see below).
 * `nginx/certs/` — self-signed TLS cert/key, auto-generated on first start,
   gitignored.
+* `nginx/logs/` — real, host-readable nginx access log (gitignored) — the
+  image's own default is a `/dev/stdout` symlink, unusable by a host-level
+  Fail2Ban. See "Deployment & hardening (PLAN.md Phase 5)" below.
 * `security/run-wpscan.sh` — the `wpscan` profile's scan script.
+* `security/fail2ban/` — Fail2Ban filter + jail, for host install (not
+  containerized). See "Deployment & hardening (PLAN.md Phase 5)" below.
 * `wp-php/uploads.ini` — upload size/memory PHP overrides.
+* `wp-php/docker-entrypoint-wrapper.sh` — locks down `wp-config.php`
+  permissions on every `wordpress` container start. See "Deployment &
+  hardening (PLAN.md Phase 5)" below.
 * `mu-plugins/` — must-use plugins, bind-mounted into `wp-content/mu-plugins`.
 * `wp-content/themes/quantumai-theme/` — the platform theme (see below).
 * `.env.example` — template for secrets; copy to `.env` (gitignored).
@@ -311,6 +319,89 @@ writes a timestamped JSON report to `security-reports/` (gitignored).
   runner — check the first scheduled/dispatched run's logs before trusting
   it unattended.
 
+## Deployment & hardening (PLAN.md Phase 5)
+
+PLAN.md Phase 5 has three parts — one already fully covered by choices made
+elsewhere in this stack, one implemented here, one that's host-level and
+documented rather than containerized:
+
+* **Secrets Management** ("credentials stored securely outside the web
+  root or injected via environment variables") — already true throughout:
+  every credential in this stack (`MYSQL_ROOT_PASSWORD`, `WP_DB_PASSWORD`,
+  `BACKUP_DB_PASSWORD`, WordPress's auth keys/salts, etc.) comes from `.env`
+  (gitignored) via Docker Compose environment injection, never hardcoded or
+  committed. Nothing further needed here — noting it explicitly rather than
+  silently skipping this part of Phase 5.
+
+* **File Permissions** ("wp-config.php secured at 400 or 440, owned by the
+  web user") — the stock `wordpress:php8.3-apache` image leaves it `644`
+  (world-readable inside the container), confirmed by checking a running
+  container, not assumed. `wp-php/docker-entrypoint-wrapper.sh` fixes this:
+  it's a small wrapper around the image's own
+  `/usr/local/bin/docker-entrypoint.sh` (bind-mounted in as the
+  `wordpress` service's `entrypoint`, see docker-compose.yml) that calls
+  the original entrypoint once with a harmless command so all its normal
+  setup runs (copy WordPress core if missing, generate `wp-config.php`
+  from `WORDPRESS_*` env vars if missing), `chmod 440`/`chown www-data`
+  the result, and only then calls the original entrypoint again with the
+  real command (`apache2-foreground`) to actually start the server. That
+  second call is cheap — WordPress core and `wp-config.php` both already
+  exist by then, so the image's own copy/generate steps are no-ops.
+  Verified end-to-end: `stat` shows `440 www-data:www-data` after a fresh
+  container start *and* after a plain restart (persists, not a one-time
+  fluke), and the site/login/REST API all still respond `200` — PHP can
+  still read the file it needs. One real bug caught while building this:
+  overriding `entrypoint:` in Compose silently clears the image's default
+  `CMD`, so `command: ["apache2-foreground"]` has to be respecified
+  explicitly — the first version omitted it and the container just exited
+  immediately with code 0 on a restart loop; see the compose comment.
+
+* **Server Hardening** ("SELinux/AppArmor, Fail2Ban") — SELinux/AppArmor
+  in the traditional sense are host-daemon Mandatory Access Control
+  systems; they don't map cleanly onto a docker-compose stack whose
+  processes already run inside Linux namespaces, not directly on a host
+  they'd be labeling. The closest container-native equivalent implemented
+  here: every service in `docker-compose.yml` now sets
+  `security_opt: [no-new-privileges:true]`, which blocks a process from
+  gaining privileges beyond what it starts with (e.g. via a setuid binary)
+  even if the container is fully compromised — confirmed harmless by
+  restarting the whole stack and re-running its normal workflows (site
+  load, login, WAF blocking a payload, a full backup run with its
+  runtime `apk add` step) with it enabled. A full seccomp profile or a
+  read-only root filesystem would go further but need real testing against
+  each image's actual runtime needs (WordPress writes to `wp-content`,
+  `mysqld` writes all over `/var/lib/mysql`, etc.) that wasn't in scope for
+  this pass — noted as a future hardening candidate, not silently skipped.
+
+  Fail2Ban itself is genuinely host-level, not something a container can
+  do (it needs to manipulate the host's own firewall) — `security/fail2ban/`
+  has `quantumai-nginx.conf` (filter) and `jail.local` (jail), meant to be
+  installed on the real host, with install steps in that filter file's own
+  comment. It targets repeated ModSecurity/CRS `403`s and repeated `404`s
+  on the real (hidden) `/wp-login.php`/`/wp-admin/*` — not a bare `403`/`404`
+  blanket match, and deliberately not WordPress login failures at all: a
+  wrong password on this stack returns `200` with an in-page error, not a
+  distinct status code, so that signal only exists at the application
+  layer, where `mu-plugins/brute-force-protection.php`'s per-IP/
+  per-username lockout and the audit log's `login_failed` events already
+  cover it — Fail2Ban is the complementary, coarser network-level layer on
+  top, not a replacement. Getting a real log for it to read needed one more
+  fix: the image's own `ACCESSLOG` defaults to a `/dev/stdout` symlink,
+  which only a container-log reader can consume, not a host-level tailing
+  process — `docker-compose.yml` now points it at a real bind-mounted file
+  (`nginx/logs/access.log`, gitignored) instead, confirmed by actually
+  curling the site and reading real log lines back off the host
+  filesystem. The filter regex itself was tested against those real
+  captured lines (a legitimate `200`, a WAF-blocked XSS payload, a scanner
+  probing the real `wp-login.php`/`wp-admin/`, a legitimate
+  `admin-ajax.php` POST, and a legitimate deleted-page `404`) — it matches
+  the first three and correctly ignores the last two. **Not verified**:
+  against a real, running Fail2Ban process — no Fail2Ban available in this
+  environment to install (and installing a host-level systemd service is
+  outside what this session is scoped to do unprompted). Run
+  `fail2ban-regex nginx/logs/access.log quantumai-nginx.conf` after
+  installing before trusting this unattended.
+
 ## Backups (PLAN.md Phase 6)
 
 `docker compose --profile backup run --rm backup` runs a full backup pass
@@ -492,6 +583,10 @@ still need to be done in the WordPress admin per
   crontab entry, not GitHub Actions) so PLAN.md Phase 6 backups actually
   happen — see "Backups" above. Store the private key safely and offline;
   this project never does that for you.
+* Install Fail2Ban on the actual host using `security/fail2ban/` (not
+  containerized — see "Deployment & hardening" above for why) so PLAN.md
+  Phase 5's "Server Hardening" item actually runs, not just exists as
+  config files sitting in the repo.
 
 ## Notes on the security choices baked into this scaffold
 

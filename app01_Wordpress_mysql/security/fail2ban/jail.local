@@ -1,0 +1,25 @@
+# PLAN.md Phase 5 Fail2Ban jail for this stack. Install alongside
+# quantumai-nginx.conf — see that file's doc comment for the full
+# rationale and install steps.
+#
+# logpath below assumes this repo is checked out at a stable path on the
+# host and Fail2Ban runs on that same host (not inside a container) — this
+# is the file docker-compose.yml's nginx service writes to via ACCESSLOG
+# (a real bind-mounted path, not the image's default /dev/stdout symlink,
+# which a host-level process can't tail — see that env var's own comment).
+# Adjust the path if your checkout lives somewhere else.
+
+[quantumai-nginx]
+enabled  = true
+filter   = quantumai-nginx
+logpath  = /path/to/app01_Wordpress_mysql/nginx/logs/access.log
+# 10 matching 403s/404s within 10 minutes bans for a day. Deliberately
+# looser than the app-layer brute-force lockout (5 failures/15 min,
+# mu-plugins/brute-force-protection.php) since this is the coarser,
+# complementary layer — WAF blocks each bad request individually
+# regardless, this is about not letting the SAME source keep re-probing
+# indefinitely at the network level.
+maxretry = 10
+findtime = 10m
+bantime  = 1d
+action   = %(action_)s
